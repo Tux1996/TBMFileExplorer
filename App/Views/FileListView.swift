@@ -75,8 +75,20 @@ struct FileListView: View {
                             DragPayloadKind.makeItemProvider(item: item, providerIdentifier: tab.provider.identifier)
                         }
                         .onDrop(of: [.fileURL, DragPayloadKind.internalReferenceType], isTargeted: nil) { providers in
-                            guard item.isDirectory else { return false }
-                            DragPayloadKind.resolve(providers) { payloads in onDropIntoFolder(item, payloads) }
+                            // A non-directory row can't itself be a drop
+                            // target, but rejecting the drop entirely made it
+                            // look like dropping anywhere in a populated list
+                            // was broken — rows cover the whole list surface,
+                            // leaving no empty background to catch the drop
+                            // instead. Falling back to "current directory"
+                            // here matches Finder's own list-view behavior
+                            // (dropping between icons still drops into the
+                            // folder they're in).
+                            if item.isDirectory {
+                                DragPayloadKind.resolve(providers) { payloads in onDropIntoFolder(item, payloads) }
+                            } else {
+                                DragPayloadKind.resolve(providers) { payloads in onDropIntoCurrentDirectory(payloads) }
+                            }
                             return true
                         }
                         .contextMenu { contextMenu(item) }
