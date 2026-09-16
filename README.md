@@ -56,3 +56,7 @@ Not implemented yet — SFTP is Phase 4. See `ROADMAP.md` for the plan (Citadel,
 ## Security
 
 No plaintext credentials anywhere in this codebase or on disk — see [`SECURITY.md`](SECURITY.md).
+
+## License
+
+[MIT](LICENSE) — matches the license of most of the third-party libraries this project builds on (see `DEPENDENCIES.md`). No GPL code is incorporated; see `ARCHITECTURE.md` §1 for why muCommander (GPLv3) was evaluated and not used as a base.

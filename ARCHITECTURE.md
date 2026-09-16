@@ -33,7 +33,7 @@ muCommander (`github.com/mucommander/mucommander`) is a real, still-active dual-
 
 ### License posture of the resulting app
 
-Because no GPL code is incorporated, this project is free to use a permissive license (MIT, matching most of its dependencies) or stay unlicensed/proprietary for personal use. The one dependency to watch is SMB (see §7) — it is deliberately kept out of the license-critical path for now.
+Because no GPL code is incorporated, this project uses the MIT license (see `LICENSE`), matching most of its dependencies. The one dependency to watch is SMB (see §7) — it is deliberately kept out of the license-critical path for now.
 
 ## 2. Layering
 
