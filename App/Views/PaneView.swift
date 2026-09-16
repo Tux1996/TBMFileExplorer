@@ -62,7 +62,14 @@ struct PaneView: View {
             }
         }
         .sheet(item: $infoItem) { item in
-            GetInfoView(item: item) { infoItem = nil }
+            GetInfoView(
+                item: item,
+                canEditPermissions: tab.provider.capabilities.canSetPermissions
+            ) { mode in
+                Task { await applyPermissions(item, mode: mode, tab: tab) }
+            } onDismiss: {
+                infoItem = nil
+            }
         }
         .onKeyPress(.space) {
             guard tab.provider.identifier == .local,
@@ -82,6 +89,17 @@ struct PaneView: View {
         } else {
             tab.errorMessage = "Opening remote files isn't supported yet — download-and-edit is coming in Phase 7."
         }
+    }
+
+    private func applyPermissions(_ item: FileItem, mode: UInt16, tab: TabViewModel) async {
+        do {
+            try await tab.provider.setPermissions(item.path, mode: mode)
+            let updated = try await tab.provider.stat(item.path)
+            infoItem = updated
+        } catch {
+            tab.errorMessage = error.localizedDescription
+        }
+        await tab.refresh()
     }
 
     private func handleDrop(_ urls: [URL], into destination: FilePath, tab: TabViewModel) {

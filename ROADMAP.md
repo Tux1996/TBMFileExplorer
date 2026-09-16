@@ -21,7 +21,7 @@ Done:
 
 Not yet done (tracked below, not silently skipped):
 - Icon/column view modes (List view only for now, as the spec allows: "Start with List view as the primary polished implementation")
-- Interactive permissions editor (checkbox/chmod UI) — local Get Info shows permissions read-only today
+- A checkbox-per-bit permissions UI — Get Info gained a numeric/octal chmod field in Phase 4 (works for local and SFTP, verified by hand against a real server), but not yet the owner/group/other × read/write/execute checkbox grid the original spec also asks for
 - Tags
 - Batch rename
 - Local search UI (provider-level `list` exists; no search index/UI yet)
@@ -43,7 +43,7 @@ Done, and verified against a real server (see `ARCHITECTURE.md` §10 and `TESTIN
 Not yet done:
 - Encrypted (passphrase-protected) keys, and RSA/ECDSA keys — blocked on a real gap in Citadel's public API (see `ARCHITECTURE.md` §10); not silently broken, throws a clear error pointing at a workaround
 - Reconnect / keep-alive policy beyond "reconnect lazily on the next call if the connection dropped" (`ensureConnected()` already does that much; no exponential backoff or explicit keep-alive ping yet)
-- Manual click-through of the remaining remote operations (permissions, drag-drop, the "host key changed" re-confirmation) — connecting, renaming, and deleting a file have been verified by hand against a real server, see `ARCHITECTURE.md` §10
+- Manual click-through of the remaining remote operations (drag-drop, the "host key changed" re-confirmation) — connecting, renaming, deleting, and setting permissions on a remote file have all been verified by hand against a real server, see `ARCHITECTURE.md` §10
 - A large (multi-GB) transfer test — the copy path is chunked and doesn't buffer whole files, but hasn't been exercised past a few hundred KB test fixture
 
 ## Phase 5 — Transfer manager — **Planned**
