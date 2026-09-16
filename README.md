@@ -12,9 +12,12 @@ planned.
 
 ## Status
 
-Phase 2 (local dual-pane browser) working; Phase 3 (the `FileProvider`
-abstraction the UI is built on) done alongside it. Nothing remote yet —
-see `ROADMAP.md`.
+Phase 2 (local dual-pane browser) and Phase 3 (the `FileProvider` abstraction
+the UI is built on) are done. Phase 4 (SFTP) has a working, tested
+`SFTPFileProvider` and a Connection Manager UI — password and unencrypted-key
+auth, host-key trust-on-first-use, list/upload/download/rename/move/delete —
+with real, documented gaps (encrypted keys, RSA/ECDSA) rather than silent
+failures. See `ROADMAP.md` for the full breakdown.
 
 ## Requirements
 
@@ -36,7 +39,7 @@ Re-run `xcodegen generate` any time `project.yml` changes, or after pulling chan
 ## Project layout
 
 ```
-Packages/TBMFileKit/   Local Swift package: FileProvider protocol, models, LocalFileProvider
+Packages/TBMFileKit/   Local Swift package: FileProvider protocol, models, LocalFileProvider, SFTP/
 App/                   SwiftUI app target: Views, ViewModels, Models, QuickLook, Utilities
 project.yml            XcodeGen spec — source of truth for the Xcode project
 ```
@@ -47,11 +50,11 @@ project.yml            XcodeGen spec — source of truth for the Xcode project
 cd Packages/TBMFileKit && swift test
 ```
 
-Runs `LocalFileProvider`'s test suite (directory listing, hidden files, collision handling, symlinks, path traversal safety). See [`TESTING.md`](TESTING.md).
+Runs the full suite — `LocalFileProvider` (directory listing, hidden files, collision handling, symlinks, path traversal safety), the OpenSSH key loader and known-hosts store, and (if the disposable local Docker SFTP server from `TESTING.md` is running) 11 integration tests against a **real SFTP server**, not mocks. See [`TESTING.md`](TESTING.md) for how to start that server.
 
 ## Connecting to a server
 
-Not implemented yet — SFTP is Phase 4. See `ROADMAP.md` for the plan (Citadel, Keychain-backed credentials, host fingerprint confirmation).
+Click the **+** next to "Servers" in the sidebar to add an SFTP connection (password or an unencrypted ed25519 key — see `ARCHITECTURE.md` §10 for why encrypted keys and RSA/ECDSA aren't supported yet). Click a saved server, or use its context menu, to connect it into either pane. First connection to a new host shows its fingerprint for you to verify before trusting it.
 
 ## Security
 

@@ -15,7 +15,7 @@ struct PaneView: View {
         let tab = pane.activeTab
         VStack(spacing: 0) {
             TabBarView(pane: pane) {
-                Task { await pane.openTab(at: tab.currentPath) }
+                Task { await pane.openTab(provider: tab.provider, at: tab.currentPath) }
             }
             Divider()
             PaneToolbarView(
@@ -65,29 +65,36 @@ struct PaneView: View {
             GetInfoView(item: item) { infoItem = nil }
         }
         .onKeyPress(.space) {
-            if let selected = tab.displayedItems.first(where: { tab.selection.contains($0.path) }) {
-                QuickLookCoordinator.shared.toggle(selected.path.localURL)
-                return .handled
+            guard tab.provider.identifier == .local,
+                  let selected = tab.displayedItems.first(where: { tab.selection.contains($0.path) }) else {
+                return .ignored
             }
-            return .ignored
+            QuickLookCoordinator.shared.toggle(selected.path.localURL)
+            return .handled
         }
     }
 
     private func open(_ item: FileItem, tab: TabViewModel) {
         if item.isDirectory {
             Task { await tab.navigate(to: item.path) }
-        } else {
+        } else if tab.provider.identifier == .local {
             WorkspaceActions.open(item.path)
+        } else {
+            tab.errorMessage = "Opening remote files isn't supported yet — download-and-edit is coming in Phase 7."
         }
     }
 
     private func handleDrop(_ urls: [URL], into destination: FilePath, tab: TabViewModel) {
+        guard case .local = tab.provider.identifier else {
+            tab.errorMessage = "Uploading into a server tab isn't supported yet — that's coming with the Transfer Manager (Phase 5)."
+            return
+        }
         Task {
             for url in urls {
                 let target = destination.appending(url.lastPathComponent)
                 guard FilePath(url.path) != target else { continue }
                 do {
-                    try await pane.provider.copy(from: FilePath(url.path), to: target)
+                    try await tab.provider.copy(from: FilePath(url.path), to: target)
                 } catch {
                     tab.errorMessage = error.localizedDescription
                 }
@@ -98,30 +105,58 @@ struct PaneView: View {
 
     @ViewBuilder
     private func contextMenu(for item: FileItem, tab: TabViewModel) -> some View {
-        Button("Open") { open(item, tab: tab) }
-        Menu("Open With") {
-            ForEach(WorkspaceActions.openWithMenuItems(for: item.path), id: \.url) { app in
-                Button(app.name) { WorkspaceActions.open(item.path, with: app.url) }
+        let isLocal = tab.provider.identifier == .local
+        if isLocal {
+            Button("Open") { open(item, tab: tab) }
+            Menu("Open With") {
+                ForEach(WorkspaceActions.openWithMenuItems(for: item.path), id: \.url) { app in
+                    Button(app.name) { WorkspaceActions.open(item.path, with: app.url) }
+                }
             }
+            Divider()
+        } else if item.isDirectory {
+            Button("Open") { open(item, tab: tab) }
+            Divider()
         }
-        Divider()
-        Button("Copy") { appModel.copy(selectedOrItem(item, tab: tab), from: pane.provider, cut: false) }
-        Button("Cut") { appModel.copy(selectedOrItem(item, tab: tab), from: pane.provider, cut: true) }
+        Button("Copy") { appModel.copy(selectedOrItem(item, tab: tab), from: tab.provider, cut: false) }
+        Button("Cut") { appModel.copy(selectedOrItem(item, tab: tab), from: tab.provider, cut: true) }
         Button("Duplicate") { Task { await tab.duplicate(item) } }
         Button("Rename…") { renamingItem = item; renameText = item.name }
         Divider()
-        Button("Move to Trash", role: .destructive) {
-            Task { await tab.moveToTrash(selectedOrItem(item, tab: tab)) }
+        if tab.provider.capabilities.canTrash {
+            Button("Move to Trash", role: .destructive) {
+                Task { await tab.moveToTrash(selectedOrItem(item, tab: tab)) }
+            }
+        } else {
+            Button("Delete", role: .destructive) {
+                Task { await tab.deletePermanently(selectedOrItem(item, tab: tab)) }
+            }
         }
         Divider()
         Button("Get Info") { infoItem = item }
-        Button("Reveal in Finder") { WorkspaceActions.revealInFinder(item.path) }
+        if isLocal {
+            Button("Reveal in Finder") { WorkspaceActions.revealInFinder(item.path) }
+        }
         Menu("Copy Path") {
             Button("Copy Path") { WorkspaceActions.copyToPasteboard(item.path.string) }
             Button("Copy Name") { WorkspaceActions.copyToPasteboard(item.name) }
+            if let profile = connectionProfile(for: tab) {
+                Button("Copy SFTP URL") {
+                    WorkspaceActions.copyToPasteboard(WorkspaceActions.sftpURL(username: profile.username, host: profile.host, port: profile.port, path: item.path.string))
+                }
+                Button("Copy SSH Command") {
+                    WorkspaceActions.copyToPasteboard(WorkspaceActions.sshCommand(username: profile.username, host: profile.host, port: profile.port))
+                }
+            }
         }
-        Button("Open Terminal Here") {
-            WorkspaceActions.openTerminal(at: item.isDirectory ? item.path : item.path.parent)
+        if isLocal {
+            Button("Open Terminal Here") {
+                WorkspaceActions.openTerminal(at: item.isDirectory ? item.path : item.path.parent)
+            }
+        } else if let profile = connectionProfile(for: tab) {
+            Button("Open SSH Session") {
+                WorkspaceActions.openSSHSession(username: profile.username, host: profile.host, port: profile.port, remotePath: (item.isDirectory ? item.path : item.path.parent).string)
+            }
         }
     }
 
@@ -133,7 +168,18 @@ struct PaneView: View {
         }
         Divider()
         Button("Refresh") { Task { await tab.refresh() } }
-        Button("Open Terminal Here") { WorkspaceActions.openTerminal(at: tab.currentPath) }
+        if tab.provider.identifier == .local {
+            Button("Open Terminal Here") { WorkspaceActions.openTerminal(at: tab.currentPath) }
+        } else if let profile = connectionProfile(for: tab) {
+            Button("Open SSH Session") {
+                WorkspaceActions.openSSHSession(username: profile.username, host: profile.host, port: profile.port, remotePath: tab.currentPath.string)
+            }
+        }
+    }
+
+    private func connectionProfile(for tab: TabViewModel) -> ConnectionProfile? {
+        guard case .sftp(let connectionID) = tab.provider.identifier else { return nil }
+        return appModel.connections.profiles.first { $0.id == connectionID }
     }
 
     private func selectedOrItem(_ item: FileItem, tab: TabViewModel) -> [FileItem] {

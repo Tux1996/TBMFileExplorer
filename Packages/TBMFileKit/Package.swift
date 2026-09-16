@@ -7,8 +7,11 @@ let package = Package(
     products: [
         .library(name: "TBMFileKit", targets: ["TBMFileKit"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/orlandos-nl/Citadel.git", from: "0.8.0")
+    ],
     targets: [
-        .target(name: "TBMFileKit"),
+        .target(name: "TBMFileKit", dependencies: ["Citadel"]),
         .testTarget(name: "TBMFileKitTests", dependencies: ["TBMFileKit"])
     ]
 )

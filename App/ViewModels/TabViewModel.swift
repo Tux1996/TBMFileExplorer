@@ -160,6 +160,20 @@ final class TabViewModel: Identifiable {
         await refresh()
     }
 
+    /// Permanent delete — used directly (skipping Trash) on providers like
+    /// SFTP that have no Trash concept (`capabilities.canTrash == false`).
+    @MainActor
+    func deletePermanently(_ items: [FileItem]) async {
+        for item in items {
+            do {
+                try await provider.delete(item.path, recursive: true)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+        await refresh()
+    }
+
     @MainActor
     func duplicate(_ item: FileItem) async {
         let base = item.path.parent

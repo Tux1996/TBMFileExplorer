@@ -54,7 +54,7 @@ Because no GPL code is incorporated, this project uses the MIT license (see `LIC
 │  (ConnectionProfile, TransferJob, etc. — see §8, Planned)      │
 ├─────────────────────────────────────────────────────────────┤
 │  Transfer Engine        (Planned, Phase 5)                     │
-│  Credential Manager     (Planned, Phase 4 — Keychain-backed)   │
+│  Credential Manager     (Implemented — Keychain-backed)        │
 │  Preview Engine         (Partially — QuickLook wrapper only)   │
 │  Editor                 (Planned, Phase 7)                     │
 │  Server Integration     (Planned, Phase 8 — custom server mode)│
@@ -105,38 +105,39 @@ public protocol FileProvider: Sendable {
     func rename(_ path: FilePath, to newName: String) async throws -> FilePath
     func setPermissions(_ path: FilePath, mode: UInt16) async throws
     func volumeInfo(for path: FilePath) async throws -> VolumeInfo?
-
-    // Streaming read/write is what the Transfer Engine (Phase 5) drives; a provider
-    // that can't stream throws .unsupported rather than buffering a whole file in RAM.
-    func readStream(_ path: FilePath) async throws -> AsyncThrowingStream<Data, Error>
-    func writeStream(_ path: FilePath) async throws -> FileWriteSink
 }
 ```
+
+`copy` is same-provider only (e.g. duplicating a file within one SFTP server) — each provider streams it internally in fixed-size chunks rather than buffering the whole file, but there's no protocol-level `readStream`/`writeStream` yet. That's deliberately deferred to Phase 5: the Transfer Engine is what actually needs a generic streaming read/write surface (to drive progress/pause/resume across *different* providers), and designing that surface before a second concrete provider (`SFTPFileProvider`) existed to validate it against would have been guessing. `SFTPFileProvider.copy` already found a real protocol subtlety worth recording here: SFTP servers may return **short reads that are not EOF** (this Docker test server caps a single read response at 64 KB regardless of the requested length) — a copy loop must keep reading from the new offset until a truly empty response, not stop early on `bytesRead < requested`. Whatever streaming API Phase 5 introduces needs to preserve that behavior.
 
 Design notes:
 - `FilePath` is a plain string wrapper, not `URL` — remote paths are POSIX paths on the remote host and forcing them through `URL`'s scheme/host model buys nothing and risks subtle percent-encoding bugs.
 - Every method is `async throws`; there is no synchronous entry point, so a provider can never be called in a way that blocks the main actor. Directory enumeration, hashing, and network calls all happen off the main thread by construction.
-- `moveToTrash` is intentionally on the protocol (not local-only outside it) so the UI can call one method and let the provider decide (`.unsupported` for remote — the UI then falls back to a "Delete permanently?" confirmation instead of silently doing something else).
-- Streaming methods return `AsyncThrowingStream`/a sink rather than `Data`, per the prompt's explicit "never load an entire large file into RAM" requirement.
+- `moveToTrash` is intentionally on the protocol (not local-only outside it) so the UI can call one method and let the provider decide (`.unsupported` for remote — the UI then falls back to a permanent-delete confirmation instead of silently doing something else). `PaneView` picks the right context-menu item and the right `TabViewModel` method (`moveToTrash` vs. `deletePermanently`) by checking `capabilities.canTrash`.
 
 `LocalFileProvider` (Implemented, `Packages/TBMFileKit/Sources/TBMFileKit/LocalFileProvider.swift`) implements this today using `FileManager` + batched `URLResourceValues` for directory listings (fast with thousands of entries) and `lstat`/`getpwuid_r`/`getgrgid_r` for permissions/owner/group/symlink data that `FileManager` doesn't expose directly.
 
+`SFTPFileProvider` (Implemented, `Packages/TBMFileKit/Sources/TBMFileKit/SFTP/SFTPFileProvider.swift`) implements this over a real Citadel SSH/SFTP connection — see §10 below for what it does and doesn't cover yet.
+
 ## 4. Concurrency & performance
 
-- All `FileProvider` calls are `async`. Directory listing for local folders runs on a background `Task`; remote providers will run their I/O on whatever executor their underlying library uses (Citadel/SwiftNIO are already non-blocking).
+- All `FileProvider` calls are `async`. Directory listing for local folders runs on a background `Task`; `SFTPFileProvider` is a Swift `actor` (not a class) so its mutable connection state (the live `SSHClient`/`SFTPClient`) can't be corrupted by concurrent calls from the UI, and its I/O rides on Citadel/SwiftNIO's own non-blocking event loop.
 - View models (`@Observable`) hold only already-fetched, `Sendable` data (`[FileItem]`); no protocol types leak into SwiftUI views.
 - Large-directory responsiveness: local listing loads metadata via a single batched `URLResourceValues` fetch per entry (no repeated `stat` round-trips per column).
 
 ## 5. Persistence
 
-- **Non-sensitive** app state (window layout, tabs, favorites, recent locations, per-connection non-secret settings, UI preferences) → `UserDefaults` for simple key/value settings now; a structured store (SwiftData or a small SQLite table) will replace it once `ConnectionProfile`/`TransferJob` history exist (Phase 4–5) and the data actually needs querying rather than just round-tripping. Decision deferred to Phase 4 rather than guessed now.
-- **Sensitive** data (passwords, SSH key passphrases) → macOS Keychain only, referenced from `ConnectionProfile` by an opaque Keychain item identifier, never inlined. No plaintext secret ever touches disk. (Planned — Phase 4, no connections exist yet to store credentials for.)
+- **Non-sensitive** app state: `ConnectionProfile`s (Implemented) persist as a plain JSON array via `ConnectionStore` (`Packages/TBMFileKit/Sources/TBMFileKit/SFTP/ConnectionStore.swift`) at `~/Library/Application Support/TBM File Explorer/connections.json`. Decided in Phase 4 rather than guessed in Phase 1: a personal list of a handful of servers doesn't need SwiftData/SQLite's query surface — that call is worth revisiting once `TransferJob` history (Phase 5) needs to be queried/filtered rather than just round-tripped, at which point a structured store may replace this for that specific model, not necessarily for `ConnectionProfile` too. Window layout, tabs, favorites, and recent locations remain `UserDefaults`-appropriate simple state, not yet wired up.
+- **Sensitive** data (passwords) → macOS Keychain only, via `CredentialManager` (`Packages/TBMFileKit/Sources/TBMFileKit/SFTP/CredentialManager.swift`), referenced from a `ConnectionProfile` by its `id` (a generic-password item keyed by `"<id>.password"`), never inlined into the JSON file above. No plaintext secret ever touches disk. SSH key *passphrases* have the same storage path designed in (`CredentialKind.keyPassphrase`) but nothing writes to it yet — see §10, encrypted-key support isn't implemented.
+- **Host keys**: a separate small JSON file (`KnownHostsStore`, `known_hosts.json` in the same directory) tracks trust-on-first-use state per `host:port`. Deliberately not the user's real `~/.ssh/known_hosts` — see §10.
 
 ## 6. Security posture (see also `SECURITY.md`)
 
 - No sandbox is enabled yet (`com.apple.security.app-sandbox = false` in the generated project). A file manager whose entire purpose is arbitrary local/remote filesystem access gets little from the sandbox without also shipping security-scoped bookmarks for every external volume/share, which is real work with no user yet to benefit from it. This is a deliberate, documented Phase-1 tradeoff, not an oversight — revisit before any wider distribution.
 - Path traversal: remote path joins go through `FilePath.appending(_:)`, which normalizes `.`/`..` server-side-safely rather than string-concatenating user input into shell/SFTP commands.
-- Shell commands (Terminal integration, Docker Compose actions, Phase 8) are invoked via `Process`/SSH `exec` with argument arrays, never via a string passed to `/bin/sh -c`, and remote paths are never interpolated into a shell string without quoting.
+- Shell commands: local Terminal-here uses `Process` with an argument array (never `/bin/sh -c` + a concatenated string). "Open SSH Session" (`WorkspaceActions.openSSHSession`) has a stricter bar — it has to hand a *string* to `osascript`/Terminal, so the remote path is shell-quoted (`'...'` with embedded quotes escaped) before being embedded in the `ssh -t` command, and that whole invocation is separately AppleScript-string-escaped before being embedded in the `do script` payload. Two distinct escaping steps for two distinct layers, not one that happens to work for today's inputs.
+- Host identity is never taken on faith: every new SFTP host goes through `KnownHostsStore` + a confirmation dialog showing the SHA256 fingerprint (§10), the same trust-on-first-use model `ssh` itself uses.
+- Docker Compose actions (Phase 8) aren't implemented yet; the confirmation requirement for destructive ones carries forward to whenever they land.
 
 ## 7. SMB note
 
@@ -144,11 +145,28 @@ Design notes:
 
 ## 8. Data models (see `DEPENDENCIES.md` for nothing here — these are ours)
 
-Implemented today: `FilePath`, `FileItem`, `FileProviderCapabilities`, `VolumeInfo`.
+Implemented today: `FilePath`, `FileItem`, `FileProviderCapabilities`, `VolumeInfo`, `ConnectionProfile`, `FavoriteLocation` *(minimal version, for the sidebar)*.
 
 Planned (designed, not yet coded — they don't exist until a phase needs them, per the project's "no placeholder implementations" rule):
-`ConnectionProfile`, `ServerBookmark`, `TransferJob`, `TransferQueue`, `TransferProgress`, `FavoriteLocation` *(a minimal version is Implemented for the sidebar today)*, `RecentLocation`, `FilePermission` (UI-facing chmod model, distinct from the raw `UInt16` mode on `FileItem`), `ServerInfo`, `ApplicationSettings`.
+`ServerBookmark`, `TransferJob`, `TransferQueue`, `TransferProgress`, `RecentLocation`, `FilePermission` (UI-facing chmod model, distinct from the raw `UInt16` mode on `FileItem`), `ServerInfo`, `ApplicationSettings`.
 
 ## 9. What exists right now vs. the phase plan
 
-See `ROADMAP.md` for the full phase breakdown. In one line: Phase 1 (this document + `DEPENDENCIES.md` + `ROADMAP.md`) is done; Phase 2 (local dual-pane browser) is started with the `FileProvider` boundary from Phase 3 already in place underneath it, because building the throwaway direct-`FileManager` version first and then refactoring would cost more than doing it right once.
+See `ROADMAP.md` for the full phase breakdown. In one line: Phase 1–3 are done; Phase 4 (SFTP) has a working, tested `SFTPFileProvider` plus a Connection Manager UI, with real gaps documented in §10 rather than silently papered over; Phases 5+ are planned.
+
+## 10. SFTP specifics (Phase 4)
+
+`SFTPFileProvider` (`Packages/TBMFileKit/Sources/TBMFileKit/SFTP/`) is built on Citadel (see `DEPENDENCIES.md`) and is a Swift `actor`, not a class — see §4.
+
+**What works, verified against a real server** (not mocks — see `TESTING.md` for the disposable local Docker SFTP container this was tested against): password authentication; unencrypted-ed25519-key authentication; trust-on-first-use host key confirmation (and re-confirmation when a key *changes*, not just when it's new); list/stat/mkdir/create-file/rename/move/delete/set-permissions; same-server file duplication via chunked copy; every "never silently overwrite" path (create-existing, move-onto-existing) actually throwing instead of clobbering.
+
+**Two real Citadel behaviors this project had to discover by testing against a live server, not from its docs** (recorded here so nobody re-derives them the hard way):
+1. Citadel throws `SFTPMessage.Status` **directly** from most request paths, not always wrapped in `SFTPError.errorStatus(_:)` — `SFTPFileProvider`'s error mapping checks for both shapes.
+2. A short SFTP read is **not** end-of-file — a server may return fewer bytes than requested for reasons unrelated to EOF (the test container caps single reads at 64 KB). `SFTPFileProvider.copy`'s chunk loop only stops on a truly empty response; an earlier version that also stopped on `bytesRead < requested` silently truncated files past the first short read, and the integration test suite caught it.
+
+**Known gaps — Planned, not silently unsupported:**
+- **Encrypted (passphrase-protected) private keys, and RSA/ECDSA keys of any kind.** Citadel has no public API to decrypt an OpenSSH private key or to parse non-ed25519 key material into its `SSHAuthenticationMethod` factories today (confirmed by reading its source — `SSHKeyDetection` can *detect* an encrypted key but nothing decrypts one). `OpenSSHEd25519KeyLoader` handles exactly the one format Citadel can consume (unencrypted ed25519) and throws a clear, actionable error — pointing at `ssh-keygen -p -N ""` as a workaround — for everything else, rather than pretending to support it. Revisit if Citadel adds this upstream, or if it becomes worth vendoring a decrypt routine.
+- **Symlink target resolution and creation.** Citadel doesn't expose `SSH_FXP_READLINK`/`SSH_FXP_SYMLINK` publicly; `capabilities.canSymlink = false` and `FileItem.symlinkTarget` is always `nil` for SFTP items (the item is still correctly flagged `isSymlink` via the permission-bits type mask).
+- **Free space / `df`-equivalent.** `volumeInfo(for:)` returns `nil` for SFTP — there's no standard SFTP query for it; that's what the Phase 8 server-info panel (via SSH `exec`) is for.
+- **Cross-provider operations** (Mac↔server drag-drop, copy/paste, upload-from-Finder-drop into a server tab) are explicitly guarded to fail with a friendly "coming in the Transfer Manager" message rather than attempting something that would silently do the wrong thing — `FileProvider.copy`/`.move` are same-provider-only by design (§3), and real cross-provider transfer is Phase 5's job.
+- **Manual UI click-through** (Add Server sheet, host-key dialog, browsing a live connection end-to-end in the actual app window) has not been done in this environment — automation here has no way to drive the native window (see `TESTING.md`). The backend this UI calls is covered by 11 tests against a real server; the UI code itself is unverified beyond "the app launches and renders."

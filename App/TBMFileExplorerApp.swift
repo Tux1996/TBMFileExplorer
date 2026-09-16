@@ -14,7 +14,8 @@ struct TBMFileExplorerApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("New Tab") {
-                    Task { await appModel.focusedPane.openTab(at: appModel.focusedPane.activeTab.currentPath) }
+                    let tab = appModel.focusedPane.activeTab
+                    Task { await appModel.focusedPane.openTab(provider: tab.provider, at: tab.currentPath) }
                 }
                 .keyboardShortcut("t", modifiers: .command)
             }

@@ -39,4 +39,37 @@ enum WorkspaceActions {
         pasteboard.clearContents()
         pasteboard.setString(string, forType: .string)
     }
+
+    static func sftpURL(username: String, host: String, port: Int, path: String) -> String {
+        port == 22 ? "sftp://\(username)@\(host)\(path)" : "sftp://\(username)@\(host):\(port)\(path)"
+    }
+
+    /// Never includes a password — matches the "Copy SSH Command" requirement's
+    /// explicit "do not include passwords in copied URLs" rule.
+    static func sshCommand(username: String, host: String, port: Int) -> String {
+        port == 22 ? "ssh \(username)@\(host)" : "ssh -p \(port) \(username)@\(host)"
+    }
+
+    /// Opens Terminal.app and starts an SSH session there, `cd`-ing to the
+    /// given remote directory first. Builds the AppleScript payload from a
+    /// fixed template with each value substituted via a dedicated quoting
+    /// step — never raw string concatenation of the path into the script.
+    static func openSSHSession(username: String, host: String, port: Int, remotePath: String) {
+        let remoteShellCommand = "cd \(shellQuoted(remotePath)) 2>/dev/null; exec \\$SHELL -l"
+        let sshInvocation = "ssh \(port == 22 ? "" : "-p \(port) ")\(shellQuoted("\(username)@\(host)")) -t \(shellQuoted(remoteShellCommand))"
+        let script = "tell application \"Terminal\"\nactivate\ndo script \(appleScriptQuoted(sshInvocation))\nend tell"
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        try? process.run()
+    }
+
+    private static func shellQuoted(_ string: String) -> String {
+        "'" + string.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private static func appleScriptQuoted(_ string: String) -> String {
+        "\"" + string.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
 }

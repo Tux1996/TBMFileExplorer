@@ -3,13 +3,13 @@ import Observation
 import TBMFileKit
 
 /// One side of the dual-pane window. Owns a set of tabs (each an independent
-/// `TabViewModel`) and tracks which one is active. Local-only for now — a pane
-/// will gain the ability to point its tabs at a remote `FileProvider` once
-/// connections exist (Phase 4), with no change to this type's shape.
+/// `TabViewModel`), and tracks which one is active. A pane has no fixed
+/// provider of its own — each tab carries its own (`TabViewModel.provider`),
+/// so one pane can hold a mix of local and server tabs side by side, and
+/// "Connect to Server" just opens a new tab pointed at an `SFTPFileProvider`.
 @Observable
 final class PaneViewModel: Identifiable {
     let id = UUID()
-    let provider: any FileProvider
     private(set) var tabs: [TabViewModel]
     var activeTabID: UUID
     var isFocused = false
@@ -19,14 +19,13 @@ final class PaneViewModel: Identifiable {
     }
 
     init(provider: any FileProvider, startPath: FilePath) {
-        self.provider = provider
         let firstTab = TabViewModel(provider: provider, path: startPath)
         self.tabs = [firstTab]
         self.activeTabID = firstTab.id
     }
 
     @MainActor
-    func openTab(at path: FilePath, makeActive: Bool = true) async {
+    func openTab(provider: any FileProvider, at path: FilePath, makeActive: Bool = true) async {
         let tab = TabViewModel(provider: provider, path: path)
         tabs.append(tab)
         if makeActive { activeTabID = tab.id }

@@ -29,15 +29,22 @@ Not yet done (tracked below, not silently skipped):
 ## Phase 3 — Common `FileProvider` abstraction — **Implemented** (pulled forward)
 Originally sequenced after Phase 2, but built alongside it: the UI in Phase 2 already talks only to the `FileProvider` protocol (`Packages/TBMFileKit`), never to `FileManager` directly. Building the throwaway direct-`FileManager` version first and refactoring afterward would have cost more than doing the abstraction once. `LocalFileProvider` is the only concrete implementation so far.
 
-## Phase 4 — SFTP — **Planned**
-- Add Citadel dependency; implement `SFTPFileProvider`
-- Password and SSH-key (incl. encrypted key + passphrase) authentication
-- `known_hosts` validation / host fingerprint confirmation UI
-- `ConnectionProfile` model + Keychain-backed `CredentialManager`
-- Server Connection Manager UI (add/edit/test SFTP hosts)
-- Remote listing, upload, download, rename, move, delete, permissions
-- Reconnect / keep-alive / connection timeout
-- Test against a real large transfer, and against disconnect/reconnect
+## Phase 4 — SFTP — **Partially Implemented**
+
+Done, and verified against a real server (see `ARCHITECTURE.md` §10 and `TESTING.md`):
+- Citadel dependency added; `SFTPFileProvider` implements the full `FileProvider` protocol (list/stat/mkdir/create/rename/move/delete/setPermissions/same-server copy)
+- Password authentication
+- Unencrypted-ed25519 SSH-key authentication (`OpenSSHEd25519KeyLoader`)
+- Host key trust-on-first-use + re-confirmation on change (`KnownHostsStore` + `SFTPHostKeyConfirming`, wired to a SwiftUI alert)
+- `ConnectionProfile` model + JSON `ConnectionStore` + Keychain-backed `CredentialManager`
+- Server Connection Manager UI: add/edit/delete sheet in the sidebar, connect into either pane
+- 11 integration tests against a disposable local Docker SFTP server, plus unit tests for the key loader and known-hosts store — 2 real bugs (error-mapping, a copy-loop truncation bug) were caught this way, not by inspection
+
+Not yet done:
+- Encrypted (passphrase-protected) keys, and RSA/ECDSA keys — blocked on a real gap in Citadel's public API (see `ARCHITECTURE.md` §10); not silently broken, throws a clear error pointing at a workaround
+- Reconnect / keep-alive policy beyond "reconnect lazily on the next call if the connection dropped" (`ensureConnected()` already does that much; no exponential backoff or explicit keep-alive ping yet)
+- Manual click-through of the Connection Manager UI in the running app (see `ARCHITECTURE.md` §10 — this environment can't automate clicks into the native window)
+- A large (multi-GB) transfer test — the copy path is chunked and doesn't buffer whole files, but hasn't been exercised past a few hundred KB test fixture
 
 ## Phase 5 — Transfer manager — **Planned**
 - `TransferJob`/`TransferQueue` models, persistent across navigation (background transfers)

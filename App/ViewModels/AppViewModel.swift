@@ -6,6 +6,7 @@ import TBMFileKit
 /// (sidebar clicks and pastes target the focused pane), sidebar contents, and
 /// the shared copy/cut clipboard.
 @Observable
+@MainActor
 final class AppViewModel {
     let localProvider = LocalFileProvider()
     let leftPane: PaneViewModel
@@ -14,6 +15,9 @@ final class AppViewModel {
 
     var favorites: [FavoriteLocation] = FavoriteLocation.standardFavorites()
     var volumes: [MountedVolume] = MountedVolume.currentVolumes()
+
+    let connections = ConnectionsViewModel()
+    let hostKeyConfirmation = HostKeyConfirmationCenter()
 
     var clipboard: FileClipboard?
 
@@ -39,6 +43,16 @@ final class AppViewModel {
         await focusedPane.navigateActiveTab(to: path)
     }
 
+    /// Opens a new tab in the given pane connected to `profile`. Connecting
+    /// itself is lazy (the first `list()` call triggers it — see
+    /// `SFTPFileProvider.ensureConnected`), so this returns immediately and
+    /// any connection/auth/host-key error surfaces as the new tab's error banner.
+    @MainActor
+    func connect(to profile: ConnectionProfile, in pane: PaneViewModel) async {
+        let provider = SFTPFileProvider(profile: profile, hostKeyConfirmer: hostKeyConfirmation)
+        await pane.openTab(provider: provider, at: FilePath(profile.defaultRemotePath))
+    }
+
     func copy(_ items: [FileItem], from provider: any FileProvider, cut: Bool) {
         clipboard = FileClipboard(items: items, sourceProvider: provider, isCut: cut)
     }
@@ -46,6 +60,10 @@ final class AppViewModel {
     @MainActor
     func paste(into tab: TabViewModel) async {
         guard let clipboard else { return }
+        guard clipboard.sourceProvider.identifier == tab.provider.identifier else {
+            tab.errorMessage = "Copying between different locations isn't supported yet — that's coming with the Transfer Manager (Phase 5)."
+            return
+        }
         for item in clipboard.items {
             let destination = tab.currentPath.appending(item.name)
             do {
