@@ -1,0 +1,42 @@
+name: TBMFileExplorer
+options:
+  bundleIdPrefix: com.techbymoe
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+packages:
+  TBMFileKit:
+    path: Packages/TBMFileKit
+
+targets:
+  TBMFileExplorer:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+        excludes:
+          - "TBMFileExplorer.entitlements"
+    settings:
+      base:
+        PRODUCT_NAME: "TBM File Explorer"
+        PRODUCT_BUNDLE_IDENTIFIER: com.techbymoe.TBMFileExplorer
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: App/TBMFileExplorer.entitlements
+        SWIFT_VERSION: "5.0"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: "TBM File Explorer"
+        NSHumanReadableCopyright: "Personal project — techbymoe"
+        LSApplicationCategoryType: public.app-category.utilities
+        NSPrincipalClass: NSApplication
+        LSMinimumSystemVersion: "14.0"
+    dependencies:
+      - package: TBMFileKit

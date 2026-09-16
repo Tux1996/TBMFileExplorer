@@ -1,0 +1,24 @@
+# Xcode / build products
+.build/
+DerivedData/
+*.xcuserstate
+*.xcuserdatad/
+xcuserdata/
+build/
+
+# XcodeGen-generated project (regenerate with `xcodegen generate`)
+*.xcodeproj/
+
+# Swift Package Manager
+.swiftpm/
+Packages/*/.build/
+Packages/*/.swiftpm/
+
+# macOS
+.DS_Store
+
+# Never commit secrets
+*.p12
+*.pem
+*.mobileprovision
+.env
