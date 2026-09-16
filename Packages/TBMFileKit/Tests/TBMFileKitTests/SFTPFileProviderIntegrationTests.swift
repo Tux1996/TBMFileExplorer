@@ -242,8 +242,82 @@ struct SFTPFileProviderIntegrationTests {
         #expect(copiedContents == payload)
     }
 
-    // MARK: - Fixture helpers (bypass SFTPFileProvider — it has no read/write content
-    // methods yet — to set up and verify test data directly against the SFTP server)
+    @Test(.enabled(if: TestSFTPServer.isReachable))
+    func streamedUploadAndDownloadRoundTripExactBytes() async throws {
+        let provider = try makePasswordProvider()
+        defer { Task { await provider.disconnect() } }
+        let dir = FilePath("/data/stream-\(UUID().uuidString)")
+        try await provider.createDirectory(dir)
+        defer { Task { try? await provider.delete(dir, recursive: true) } }
+
+        // Larger than one 256 KB chunk, to exercise the loop both ways.
+        let payload = Data((0..<(300 * 1024)).map { UInt8(($0 * 7) % 256) })
+        let path = dir.appending("streamed.bin")
+
+        let sink = try await provider.openWriteSink(path, mode: .createFailIfExists)
+        for chunkStart in stride(from: 0, to: payload.count, by: 64 * 1024) {
+            let end = min(chunkStart + 64 * 1024, payload.count)
+            try await sink.write(payload.subdata(in: chunkStart..<end))
+        }
+        try await sink.finish()
+
+        let attrs = try await provider.stat(path)
+        #expect(attrs.size == Int64(payload.count))
+
+        var readBack = Data()
+        for try await chunk in await provider.readChunks(path, startingAt: 0) {
+            readBack.append(chunk)
+        }
+        #expect(readBack == payload)
+    }
+
+    @Test(.enabled(if: TestSFTPServer.isReachable))
+    func resumeAppendContinuesUploadFromExistingSize() async throws {
+        let provider = try makePasswordProvider()
+        defer { Task { await provider.disconnect() } }
+        let dir = FilePath("/data/resume-\(UUID().uuidString)")
+        try await provider.createDirectory(dir)
+        defer { Task { try? await provider.delete(dir, recursive: true) } }
+        let path = dir.appending("resumed.bin")
+
+        let firstHalf = Data("first half of the file ".utf8)
+        let firstSink = try await provider.openWriteSink(path, mode: .createFailIfExists)
+        try await firstSink.write(firstHalf)
+        try await firstSink.finish()
+
+        // Simulates resuming an interrupted upload: the caller stats the
+        // (partial) destination, and reads the source starting at that offset.
+        let partialAttrs = try await provider.stat(path)
+        #expect(partialAttrs.size == Int64(firstHalf.count))
+
+        let secondHalf = Data("second half of the file".utf8)
+        let resumedSink = try await provider.openWriteSink(path, mode: .resumeAppend)
+        try await resumedSink.write(secondHalf)
+        try await resumedSink.finish()
+
+        let finalContents = try await readFixtureFile(at: path)
+        #expect(finalContents == firstHalf + secondHalf)
+    }
+
+    @Test(.enabled(if: TestSFTPServer.isReachable))
+    func readChunksStartingAtOffsetSkipsLeadingBytes() async throws {
+        let provider = try makePasswordProvider()
+        defer { Task { await provider.disconnect() } }
+        let dir = FilePath("/data/offset-\(UUID().uuidString)")
+        try await provider.createDirectory(dir)
+        defer { Task { try? await provider.delete(dir, recursive: true) } }
+        let path = dir.appending("offset.bin")
+        try await writeFixtureFile(at: path, contents: Data("0123456789".utf8))
+
+        var readBack = Data()
+        for try await chunk in await provider.readChunks(path, startingAt: 5) {
+            readBack.append(chunk)
+        }
+        #expect(readBack == Data("56789".utf8))
+    }
+
+    // MARK: - Fixture helpers, for setting up and verifying test data using
+    // Citadel directly rather than the SFTPFileProvider under test
 
     private func writeFixtureFile(at path: FilePath, contents: Data) async throws {
         let client = try await SSHClient.connect(to: SSHClientSettings(

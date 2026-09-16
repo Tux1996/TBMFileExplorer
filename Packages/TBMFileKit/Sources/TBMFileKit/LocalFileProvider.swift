@@ -152,6 +152,62 @@ public final class LocalFileProvider: FileProvider {
         }.value
     }
 
+    // MARK: - Streaming (Phase 5 Transfer Engine)
+
+    public func readChunks(_ path: FilePath, startingAt offset: Int64) async -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task.detached(priority: .userInitiated) {
+                do {
+                    guard let handle = FileHandle(forReadingAtPath: path.string) else {
+                        continuation.finish(throwing: FileProviderError.notFound(path))
+                        return
+                    }
+                    defer { try? handle.close() }
+                    if offset > 0 {
+                        try handle.seek(toOffset: UInt64(offset))
+                    }
+                    let chunkSize = 256 * 1024
+                    while !Task.isCancelled {
+                        guard let data = try handle.read(upToCount: chunkSize), !data.isEmpty else { break }
+                        continuation.yield(data)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    public func openWriteSink(_ path: FilePath, mode: WriteMode) async throws -> any FileWriteSink {
+        try await Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            switch mode {
+            case .createFailIfExists:
+                if fm.fileExists(atPath: path.string) {
+                    throw FileProviderError.alreadyExists(path)
+                }
+                guard fm.createFile(atPath: path.string, contents: nil) else {
+                    throw FileProviderError.underlying("Could not create \(path.lastComponent).")
+                }
+            case .resumeAppend:
+                if !fm.fileExists(atPath: path.string) {
+                    guard fm.createFile(atPath: path.string, contents: nil) else {
+                        throw FileProviderError.underlying("Could not create \(path.lastComponent).")
+                    }
+                }
+            }
+            guard let handle = FileHandle(forWritingAtPath: path.string) else {
+                throw FileProviderError.underlying("Could not open \(path.lastComponent) for writing.")
+            }
+            if case .resumeAppend = mode {
+                handle.seekToEndOfFile()
+            }
+            return LocalFileWriteSink(handle: handle) as any FileWriteSink
+        }.value
+    }
+
     // MARK: - Metadata assembly
 
     private static func makeItem(at url: URL) throws -> FileItem {
@@ -210,5 +266,24 @@ public final class LocalFileProvider: FileProvider {
             return nil
         }
         return String(cString: grp.gr_name)
+    }
+}
+
+/// `@unchecked Sendable`: writes must be issued sequentially by contract (see
+/// `FileWriteSink`), so the lack of internal locking is safe under that usage,
+/// not despite it.
+final class LocalFileWriteSink: FileWriteSink, @unchecked Sendable {
+    private let handle: FileHandle
+
+    init(handle: FileHandle) {
+        self.handle = handle
+    }
+
+    func write(_ data: Data) async throws {
+        try handle.write(contentsOf: data)
+    }
+
+    func finish() async throws {
+        try handle.close()
     }
 }

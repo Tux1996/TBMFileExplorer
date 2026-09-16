@@ -41,6 +41,14 @@ struct MainWindowView: View {
         } message: { request in
             Text(hostKeyAlertMessage(for: request))
         }
+        .sheet(item: Binding(
+            get: { appModel.transferCollisionCenter.pendingRequest },
+            set: { if $0 == nil { appModel.transferCollisionCenter.respond(.cancel, applyToAll: false) } }
+        )) { request in
+            CollisionSheet(request: request) { resolution, applyToAll in
+                appModel.transferCollisionCenter.respond(resolution, applyToAll: applyToAll)
+            }
+        }
     }
 
     private var hostKeyAlertTitle: String {

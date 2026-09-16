@@ -6,6 +6,7 @@ struct SidebarView: View {
     @State private var editingProfile: ConnectionProfile?
     @State private var isAddingProfile = false
     @State private var errorMessage: String?
+    @State private var isShowingTransfers = false
 
     var body: some View {
         @Bindable var appModel = appModel
@@ -53,13 +54,32 @@ struct SidebarView: View {
                 }
             }
             Section("Transfers") {
-                Text("No active transfers")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                if appModel.transferManager.jobs.isEmpty {
+                    Text("No transfers yet")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Label("\(activeTransferCount) Active", systemImage: "arrow.down.circle")
+                        .contentShape(Rectangle())
+                        .onTapGesture { isShowingTransfers = true }
+                    Label("\(completedTransferCount) Completed", systemImage: "checkmark.circle")
+                        .foregroundStyle(.secondary)
+                        .contentShape(Rectangle())
+                        .onTapGesture { isShowingTransfers = true }
+                    if failedTransferCount > 0 {
+                        Label("\(failedTransferCount) Failed", systemImage: "exclamationmark.circle")
+                            .foregroundStyle(.red)
+                            .contentShape(Rectangle())
+                            .onTapGesture { isShowingTransfers = true }
+                    }
+                }
             }
         }
         .listStyle(.sidebar)
         .onAppear { appModel.refreshVolumes() }
+        .sheet(isPresented: $isShowingTransfers) {
+            TransfersView()
+        }
         .sheet(isPresented: $isAddingProfile) {
             ConnectionEditorView(profile: nil) { profile, password in
                 save(profile, password: password)
@@ -81,6 +101,18 @@ struct SidebarView: View {
         } message: {
             Text(errorMessage ?? "")
         }
+    }
+
+    private var activeTransferCount: Int {
+        appModel.transferManager.jobs.filter { $0.status == .running || $0.status == .queued || $0.status == .paused }.count
+    }
+
+    private var completedTransferCount: Int {
+        appModel.transferManager.jobs.filter { $0.status == .completed }.count
+    }
+
+    private var failedTransferCount: Int {
+        appModel.transferManager.jobs.filter { if case .failed = $0.status { true } else { false } }.count
     }
 
     private func navigate(to path: FilePath) {

@@ -55,6 +55,7 @@ Nothing in this table is vendored/copied source — everything marked "Selected"
 | `Foundation.FileManager` / `URLResourceValues` / POSIX (`lstat`, `getpwuid_r`, `getgrgid_r`, `chmod`) | Local filesystem provider. |
 | `NSWorkspace` | Open/Open With, reveal in Finder, launching Terminal. |
 | `Network`/`Process` | Fallback FTP implementation path and shelling out to `ssh`/Terminal.app respectively, if/when needed. |
+| `UserNotifications` | Transfer completion/failure notifications (Phase 5), for transfers above a size threshold — the spec's "notify on large transfer completion/failure," not every transfer. |
 
 ## Explicitly not reused
 

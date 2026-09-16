@@ -56,8 +56,8 @@ struct FileListHeaderView: View {
 struct FileListView: View {
     @Bindable var tab: TabViewModel
     var onOpen: (FileItem) -> Void
-    var onDropIntoFolder: (FileItem, [URL]) -> Void
-    var onDropIntoCurrentDirectory: ([URL]) -> Void
+    var onDropIntoFolder: (FileItem, [DragPayloadItem]) -> Void
+    var onDropIntoCurrentDirectory: ([DragPayloadItem]) -> Void
     var contextMenu: (FileItem) -> AnyView
     var backgroundContextMenu: () -> AnyView
 
@@ -72,11 +72,11 @@ struct FileListView: View {
                         .contentShape(Rectangle())
                         .onTapGesture(count: 2) { onOpen(item) }
                         .onDrag {
-                            NSItemProvider(object: item.path.localURL as NSURL)
+                            DragPayloadKind.makeItemProvider(item: item, providerIdentifier: tab.provider.identifier)
                         }
-                        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+                        .onDrop(of: [.fileURL, DragPayloadKind.internalReferenceType], isTargeted: nil) { providers in
                             guard item.isDirectory else { return false }
-                            Self.resolveFileURLs(providers) { urls in onDropIntoFolder(item, urls) }
+                            DragPayloadKind.resolve(providers) { payloads in onDropIntoFolder(item, payloads) }
                             return true
                         }
                         .contextMenu { contextMenu(item) }
@@ -84,34 +84,22 @@ struct FileListView: View {
             }
             .listStyle(.plain)
             .contextMenu { backgroundContextMenu() }
-            .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-                Self.resolveFileURLs(providers) { urls in onDropIntoCurrentDirectory(urls) }
+            .onDrop(of: [.fileURL, DragPayloadKind.internalReferenceType], isTargeted: nil) { providers in
+                DragPayloadKind.resolve(providers) { payloads in onDropIntoCurrentDirectory(payloads) }
                 return true
             }
         }
     }
-
-    /// `.onDrag`/`.onDrop` (NSItemProvider-based) instead of the newer
-    /// `.draggable`/`.dropDestination` (Transferable-based) pair — the newer
-    /// API reliably failed to deliver drops here when nested at both the row
-    /// and List level inside a macOS `List`/`NSTableView` (drag would start,
-    /// show the accept cursor, and the drop would silently no-op on release).
-    /// This older pairing is far more battle-tested for exactly this case.
-    private static func resolveFileURLs(_ providers: [NSItemProvider], completion: @escaping ([URL]) -> Void) {
-        var results = [URL?](repeating: nil, count: providers.count)
-        let group = DispatchGroup()
-        for (index, provider) in providers.enumerated() {
-            group.enter()
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                results[index] = url
-                group.leave()
-            }
-        }
-        group.notify(queue: .main) {
-            completion(results.compactMap { $0 })
-        }
-    }
 }
+
+// `.onDrag`/`.onDrop` (NSItemProvider-based) instead of the newer
+// `.draggable`/`.dropDestination` (Transferable-based) pair — the newer API
+// reliably failed to deliver drops here when nested at both the row and List
+// level inside a macOS `List`/`NSTableView` (drag would start, show the
+// accept cursor, and the drop would silently no-op on release). This older
+// pairing is far more battle-tested for exactly this case. See
+// `DragPayloadKind` for how a remote row's drag carries its true source
+// provider instead of a bogus local file URL.
 
 struct FileRowView: View {
     let item: FileItem

@@ -40,3 +40,30 @@ targets:
         LSMinimumSystemVersion: "14.0"
     dependencies:
       - package: TBMFileKit
+
+  TBMFileExplorerTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: AppTests
+    dependencies:
+      - target: TBMFileExplorer
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/TBM File Explorer.app/Contents/MacOS/TBM File Explorer"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  TBMFileExplorer:
+    build:
+      targets:
+        TBMFileExplorer: all
+        TBMFileExplorerTests: [test]
+    test:
+      targets:
+        - TBMFileExplorerTests
+    run:
+      config: Debug

@@ -102,22 +102,67 @@ struct PaneView: View {
         await tab.refresh()
     }
 
-    private func handleDrop(_ urls: [URL], into destination: FilePath, tab: TabViewModel) {
-        guard case .local = tab.provider.identifier else {
-            tab.errorMessage = "Uploading into a server tab isn't supported yet — that's coming with the Transfer Manager (Phase 5)."
-            return
-        }
+    private func handleDrop(_ payloads: [DragPayloadItem], into destination: FilePath, tab: TabViewModel) {
         Task {
-            for url in urls {
-                let target = destination.appending(url.lastPathComponent)
-                guard FilePath(url.path) != target else { continue }
+            var sameProviderSources: [FilePath] = []
+            var crossProvider: (provider: any FileProvider, displayName: String)?
+            var crossProviderRequests: [TransferRequest] = []
+
+            for payload in payloads {
+                let sourcePath: FilePath
+                let sourceProviderKey: String
+                let resolvedProvider: any FileProvider
+                let resolvedDisplayName: String
+
+                switch payload {
+                case .local(let url):
+                    sourcePath = FilePath(url.path)
+                    sourceProviderKey = FileProviderIdentifier.local.stableKey
+                    resolvedProvider = appModel.localProvider
+                    resolvedDisplayName = appModel.localProvider.displayName
+                case .remote(let providerKey, let path):
+                    sourcePath = FilePath(path)
+                    sourceProviderKey = providerKey
+                    guard let found = appModel.liveProvider(forKey: providerKey) else {
+                        tab.errorMessage = "That file's connection is no longer open."
+                        continue
+                    }
+                    resolvedProvider = found
+                    resolvedDisplayName = found.displayName
+                }
+
+                if sourceProviderKey == tab.provider.identifier.stableKey {
+                    sameProviderSources.append(sourcePath)
+                } else {
+                    crossProvider = (resolvedProvider, resolvedDisplayName)
+                    crossProviderRequests.append(TransferRequest(sourcePath: sourcePath, name: sourcePath.lastComponent))
+                }
+            }
+
+            for sourcePath in sameProviderSources {
+                let target = destination.appending(sourcePath.lastComponent)
+                guard sourcePath != target else { continue }
                 do {
-                    try await tab.provider.copy(from: FilePath(url.path), to: target)
+                    try await tab.provider.copy(from: sourcePath, to: target)
                 } catch {
                     tab.errorMessage = error.localizedDescription
                 }
             }
-            await tab.refresh()
+            if !sameProviderSources.isEmpty {
+                await tab.refresh()
+            }
+
+            if let crossProvider, !crossProviderRequests.isEmpty {
+                await appModel.transferManager.enqueueBatch(
+                    crossProviderRequests,
+                    source: crossProvider.provider,
+                    sourceDisplayName: crossProvider.displayName,
+                    destination: tab.provider,
+                    destinationDisplayName: tab.provider.displayName,
+                    destinationDirectory: destination,
+                    collisionResolver: appModel.transferCollisionCenter
+                )
+            }
         }
     }
 

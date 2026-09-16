@@ -105,10 +105,16 @@ public protocol FileProvider: Sendable {
     func rename(_ path: FilePath, to newName: String) async throws -> FilePath
     func setPermissions(_ path: FilePath, mode: UInt16) async throws
     func volumeInfo(for path: FilePath) async throws -> VolumeInfo?
+
+    // Added in Phase 5, once the Transfer Engine needed a generic streaming
+    // surface to move bytes between two *different* providers (not just
+    // within one, which `copy` above already handled internally).
+    func readChunks(_ path: FilePath, startingAt offset: Int64) async -> AsyncThrowingStream<Data, Error>
+    func openWriteSink(_ path: FilePath, mode: WriteMode) async throws -> any FileWriteSink
 }
 ```
 
-`copy` is same-provider only (e.g. duplicating a file within one SFTP server) — each provider streams it internally in fixed-size chunks rather than buffering the whole file, but there's no protocol-level `readStream`/`writeStream` yet. That's deliberately deferred to Phase 5: the Transfer Engine is what actually needs a generic streaming read/write surface (to drive progress/pause/resume across *different* providers), and designing that surface before a second concrete provider (`SFTPFileProvider`) existed to validate it against would have been guessing. `SFTPFileProvider.copy` already found a real protocol subtlety worth recording here: SFTP servers may return **short reads that are not EOF** (this Docker test server caps a single read response at 64 KB regardless of the requested length) — a copy loop must keep reading from the new offset until a truly empty response, not stop early on `bytesRead < requested`. Whatever streaming API Phase 5 introduces needs to preserve that behavior.
+`copy` is still same-provider only (e.g. duplicating a file within one SFTP server) — each provider streams it internally rather than buffering the whole file. `readChunks`/`openWriteSink` are the general-purpose version `TransferManager` (Phase 5) drives to move bytes between two *different* live providers, one chunk at a time, with `startingAt`/`WriteMode.resumeAppend` supporting resuming an interrupted transfer without re-sending bytes the destination already has. Designing this before a second concrete provider (`SFTPFileProvider`) existed to validate it against would have been guessing — waiting until Phase 5 needed it for real was the right call. `SFTPFileProvider.copy` already found a real protocol subtlety worth recording here: SFTP servers may return **short reads that are not EOF** (this Docker test server caps a single read response at 64 KB regardless of the requested length) — a copy loop must keep reading from the new offset until a truly empty response, not stop early on `bytesRead < requested`. `readChunks`/`openWriteSink` preserve that behavior on both providers.
 
 Design notes:
 - `FilePath` is a plain string wrapper, not `URL` — remote paths are POSIX paths on the remote host and forcing them through `URL`'s scheme/host model buys nothing and risks subtle percent-encoding bugs.
@@ -145,14 +151,14 @@ Design notes:
 
 ## 8. Data models (see `DEPENDENCIES.md` for nothing here — these are ours)
 
-Implemented today: `FilePath`, `FileItem`, `FileProviderCapabilities`, `VolumeInfo`, `ConnectionProfile`, `FavoriteLocation` *(minimal version, for the sidebar)*.
+Implemented today: `FilePath`, `FileItem`, `FileProviderCapabilities`, `VolumeInfo`, `ConnectionProfile`, `FavoriteLocation` *(minimal version, for the sidebar)*, `TransferJob`.
 
 Planned (designed, not yet coded — they don't exist until a phase needs them, per the project's "no placeholder implementations" rule):
-`ServerBookmark`, `TransferJob`, `TransferQueue`, `TransferProgress`, `RecentLocation`, `FilePermission` (UI-facing chmod model, distinct from the raw `UInt16` mode on `FileItem`), `ServerInfo`, `ApplicationSettings`.
+`ServerBookmark`, `RecentLocation`, `FilePermission` (UI-facing chmod model, distinct from the raw `UInt16` mode on `FileItem`), `ServerInfo`, `ApplicationSettings`. (`TransferQueue`/`TransferProgress` from the original design didn't end up needing to exist as separate types — `TransferManager` holds `[TransferJob]` directly, and progress/speed/ETA are just computed properties on `TransferJob` itself.)
 
 ## 9. What exists right now vs. the phase plan
 
-See `ROADMAP.md` for the full phase breakdown. In one line: Phase 1–3 are done; Phase 4 (SFTP) has a working, tested `SFTPFileProvider` plus a Connection Manager UI, with real gaps documented in §10 rather than silently papered over; Phases 5+ are planned.
+See `ROADMAP.md` for the full phase breakdown. In one line: Phase 1–3 are done; Phase 4 (SFTP) has a working, tested `SFTPFileProvider` plus a Connection Manager UI, with real gaps documented in §10 rather than silently papered over; Phase 5 (Transfer Manager) has a working, tested `TransferManager` driving real Mac↔server transfers, with real gaps documented in §12; Phases 6+ are planned.
 
 ## 10. SFTP specifics (Phase 4)
 
@@ -179,3 +185,17 @@ Drag-and-drop (Phase 2, local files) looked complete in code — `.draggable`/`.
 This is a real, reported limitation of `.draggable`/`.dropDestination` nested inside a macOS `List` (which is backed by `NSTableView`, not a plain `ScrollView`) — the newer Transferable-based drag machinery doesn't reliably hand off to SwiftUI's per-row and per-container drop handlers there, even though the identical pattern works on iOS. The fix (`App/Views/FileListView.swift`) was to drop back to the older, `NSItemProvider`-based `.onDrag`/`.onDrop` pair, which has been part of SwiftUI since its first release and is far more thoroughly exercised against `List` on macOS specifically. Resolving the dropped `NSItemProvider`s back into `URL`s needs its own small async fan-in (`loadObject(ofClass: URL.self)` per provider, joined with a `DispatchGroup`) since the older API predates Swift concurrency.
 
 Worth remembering for any *other* `List`-hosted drag-and-drop added later in this app (e.g. dragging transfer-queue rows in Phase 5): prefer `.onDrag`/`.onDrop` over `.draggable`/`.dropDestination` inside a `List` on macOS until Apple's own bug tracker shows this fixed.
+
+A follow-on gap the above fix surfaced: a *remote* row's drag payload was still just `item.path.localURL` — a `file://` URL that doesn't exist locally, since the file lives on a server. That's harmless for local-to-local drags (§11 was about those) but means dragging a server row anywhere produced a bogus reference. `App/Utilities/DragPayload.swift` fixes this properly: a row's `NSItemProvider` carries the real local `URL` when local (for Finder interop) *and* a small JSON-encoded `(providerKey, path)` reference via a private, in-process-only `UTType`. A drop resolves the internal reference first, falling back to the file URL — so a remote row's true source provider and path survive the trip through the OS pasteboard mechanism, and the drop side can look the live provider back up by key among currently-open tabs (`AppViewModel.liveProvider(forKey:)`).
+
+## 12. Transfer Manager specifics (Phase 5)
+
+`TransferManager` (`App/ViewModels/TransferManager.swift`) is `@Observable @MainActor`, not an actor — see §4's reasoning for why that's an acceptable tradeoff here (the per-chunk MainActor hop is cheap relative to real I/O, and it means `[TransferJob]` can be observed directly by SwiftUI with no extra bridging).
+
+**What works, verified by a real (if fast/deterministic, using an in-memory `FileProvider` fake) test suite** (`AppTests/TransferManagerTests.swift`, 9 tests) and a clean build against the real app: enqueuing a batch and streaming a file to completion with matching bytes; every collision resolution (Replace/Skip/Keep Both/Resume) doing what it says, including Resume correctly picking up from the destination's existing size; "Apply to All" reusing the first decision for the rest of a batch without re-prompting; pausing a running transfer (verified it doesn't silently keep making progress) and resuming it to completion; cancelling a running transfer actually stopping it; retrying a failed job resetting its state and succeeding once the underlying problem is fixed.
+
+**Two real concurrency bugs this project had to discover by testing, not by inspection** (recorded here so nobody re-derives them the hard way):
+1. **`for try await chunk in stream` exits silently — not by throwing — when the consuming `Task` is cancelled while awaiting the stream's next value.** This is genuinely how `AsyncThrowingStream` iteration behaves in Swift Concurrency, not a bug in this project's own stream implementations: cancellation of the *consumer* doesn't propagate as a thrown error from the `for await` loop itself. The original `run()` put its only `Task.checkCancellation()` *inside* the loop body, so cancelling mid-transfer made the loop quietly stop producing new iterations and fall through to the success path, reporting `.completed` (with a truncated file) instead of `.cancelled`. Fixed with a second `Task.checkCancellation()` immediately *after* the loop, before treating its exit as success. Reproduced and verified in isolation with a ~15-line standalone script before touching the real code, specifically to rule out a mistake in the fix itself.
+2. **A failed transfer could leave a stray empty file at the destination.** `run()` opened the destination write sink (which, for `.createFailIfExists`, creates the file as a side effect of claiming it exclusively) *before* confirming the source was actually readable. A missing/bad source then failed after the destination artifact already existed — harmless the first time, but it meant retrying the exact same failure produced a *different*, more confusing error (`.alreadyExists` instead of the original `.notFound`), found via a retry test. Fixed by stat-ing the source first and only opening the destination sink once that succeeds.
+
+**Known gaps — Planned, not silently unsupported:** folder transfers between different providers; "Compare" as a collision option; post-transfer hash verification; a UI for the concurrency limit; disconnect-specific notifications. See `ROADMAP.md` Phase 5 for the full list.

@@ -6,6 +6,7 @@ struct StatusBarView: View {
 
     var body: some View {
         let tab = appModel.focusedPane.activeTab
+        let manager = appModel.transferManager
         HStack {
             Text(itemCountText(tab))
             if !tab.selection.isEmpty {
@@ -13,6 +14,13 @@ struct StatusBarView: View {
                 Text(selectionText(tab))
             }
             Spacer()
+            if manager.activeCount > 0 {
+                Text("\(manager.activeCount) transfer\(manager.activeCount == 1 ? "" : "s")")
+                Text("·").foregroundStyle(.tertiary)
+                Text(ByteCountFormatter.string(fromByteCount: Int64(manager.totalSpeedBytesPerSecond), countStyle: .file) + "/s")
+                Text("·").foregroundStyle(.tertiary)
+                Text(ByteCountFormatter.string(fromByteCount: manager.totalRemainingBytes, countStyle: .file) + " remaining")
+            }
         }
         .font(.system(size: 11))
         .foregroundStyle(.secondary)

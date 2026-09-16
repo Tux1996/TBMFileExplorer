@@ -18,6 +18,8 @@ final class AppViewModel {
 
     let connections = ConnectionsViewModel()
     let hostKeyConfirmation = HostKeyConfirmationCenter()
+    let transferManager = TransferManager()
+    let transferCollisionCenter = TransferCollisionCenter()
 
     var clipboard: FileClipboard?
 
@@ -31,6 +33,21 @@ final class AppViewModel {
 
     var focusedPane: PaneViewModel {
         focusedPaneID == leftPane.id ? leftPane : rightPane
+    }
+
+    /// Finds a live provider matching a drag payload's `stableKey` among
+    /// currently open tabs — a drag session only carries that key (not a
+    /// serialized provider), so the drop side has to look the real instance
+    /// back up. Any tab connected to the same server works equally well; they
+    /// share credentials and host, just not the same live SSH session object.
+    func liveProvider(forKey key: String) -> (any FileProvider)? {
+        if key == FileProviderIdentifier.local.stableKey { return localProvider }
+        for pane in [leftPane, rightPane] {
+            if let match = pane.tabs.first(where: { $0.provider.identifier.stableKey == key }) {
+                return match.provider
+            }
+        }
+        return nil
     }
 
     @MainActor
@@ -60,23 +77,45 @@ final class AppViewModel {
     @MainActor
     func paste(into tab: TabViewModel) async {
         guard let clipboard else { return }
-        guard clipboard.sourceProvider.identifier == tab.provider.identifier else {
-            tab.errorMessage = "Copying between different locations isn't supported yet — that's coming with the Transfer Manager (Phase 5)."
+
+        if clipboard.sourceProvider.identifier == tab.provider.identifier {
+            for item in clipboard.items {
+                let destination = tab.currentPath.appending(item.name)
+                do {
+                    if clipboard.isCut {
+                        try await clipboard.sourceProvider.move(from: item.path, to: destination)
+                    } else {
+                        try await clipboard.sourceProvider.copy(from: item.path, to: destination)
+                    }
+                } catch {
+                    tab.errorMessage = error.localizedDescription
+                }
+            }
+            if clipboard.isCut { self.clipboard = nil }
+            await tab.refresh()
             return
         }
-        for item in clipboard.items {
-            let destination = tab.currentPath.appending(item.name)
-            do {
-                if clipboard.isCut {
-                    try await clipboard.sourceProvider.move(from: item.path, to: destination)
-                } else {
-                    try await clipboard.sourceProvider.copy(from: item.path, to: destination)
-                }
-            } catch {
-                tab.errorMessage = error.localizedDescription
-            }
+
+        // Cross-provider: hand off to the Transfer Manager. Folders aren't
+        // supported by the streaming transfer path yet (see ROADMAP.md) — skip
+        // them with a clear message rather than silently dropping them.
+        let files = clipboard.items.filter { !$0.isDirectory }
+        if files.count != clipboard.items.count {
+            tab.errorMessage = "Skipped \(clipboard.items.count - files.count) folder(s) — folder transfers between different locations aren't supported yet."
         }
+        guard !files.isEmpty else { return }
+
+        let requests = files.map { TransferRequest(sourcePath: $0.path, name: $0.name) }
+        await transferManager.enqueueBatch(
+            requests,
+            source: clipboard.sourceProvider,
+            sourceDisplayName: clipboard.sourceProvider.displayName,
+            destination: tab.provider,
+            destinationDisplayName: tab.provider.displayName,
+            destinationDirectory: tab.currentPath,
+            collisionResolver: transferCollisionCenter,
+            deleteSourceAfterSuccess: clipboard.isCut
+        )
         if clipboard.isCut { self.clipboard = nil }
-        await tab.refresh()
     }
 }

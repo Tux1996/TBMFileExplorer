@@ -46,13 +46,24 @@ Not yet done:
 - Manual click-through of remaining remote-specific operations (drag-drop into/within a server tab — expected to show the "not supported yet" message by design, untested whether it actually does; the "host key changed" re-confirmation) — connecting, renaming, deleting, and setting permissions on a remote file have all been verified by hand against a real server, see `ARCHITECTURE.md` §10
 - A large (multi-GB) transfer test — the copy path is chunked and doesn't buffer whole files, but hasn't been exercised past a few hundred KB test fixture
 
-## Phase 5 — Transfer manager — **Planned**
-- `TransferJob`/`TransferQueue` models, persistent across navigation (background transfers)
-- Progress, speed, ETA; pause/resume where the protocol supports it; retry; cancel
-- Collision handling: Replace / Skip / Keep Both / Resume / Compare / Cancel / Apply to All
-- Configurable concurrency limit
-- Optional post-transfer hash verification (MD5/SHA-1/SHA-256, opt-in for large files)
-- Completion/failure/disconnect notifications
+## Phase 5 — Transfer manager — **Partially Implemented**
+
+Done, and covered by a real test suite (`AppTests/TransferManagerTests.swift`, 9 tests against an in-memory `FileProvider` fake — fast/deterministic, since the streaming primitives underneath already have their own real-disk/real-server tests in `TBMFileKitTests`):
+- `FileProvider` gained `readChunks`/`openWriteSink` (chunked streaming read/write, with offset support for resuming) — the actual thing that makes cross-provider transfer possible, implemented for both `LocalFileProvider` and `SFTPFileProvider`
+- `TransferJob` model + `TransferManager` (queue, concurrency limit, progress/speed/ETA tracking, pause/resume, cancel, retry)
+- Collision handling: Replace / Skip / Keep Both / Resume / Cancel, with an "Apply to All" checkbox for the rest of a batch — Compare is not implemented (see below)
+- Drag-and-drop and clipboard copy/paste between *different* providers (Mac↔server) now actually transfer, instead of showing "not supported yet" — same-provider operations still go through the direct `FileProvider.copy`/`.move` path unchanged
+- A Transfers panel (sidebar → progress list with pause/resume/cancel/retry/remove) and a transfer summary in the main status bar
+- Basic completion/failure notifications via `UserNotifications`, for transfers above a size threshold
+- Two real concurrency bugs found by testing, not inspection: cancelling a transfer reported `.completed` instead of `.cancelled`, because `for try await` over an `AsyncThrowingStream` exits *silently* (not by throwing) when the consuming Task is cancelled — a genuine, easy-to-miss Swift Concurrency gotcha, fixed by re-checking `Task.checkCancellation()` immediately after the loop. And a failed transfer (bad source) could leave a stray empty file at the destination, because the destination write sink was opened before the source was verified readable.
+
+Not yet done:
+- Folder transfers between different providers (same-provider folder copy on SFTP was already a known Phase-4 gap; cross-provider folder transfer needs recursive enumeration + per-file job creation, not built yet) — currently skipped with a clear message rather than silently dropped
+- "Compare" as a collision option (would need a checksum or byte-level diff before deciding)
+- Hash verification after transfer (MD5/SHA-1/SHA-256) — not implemented
+- A configurable concurrency-limit UI (the `maxConcurrentTransfers` property exists and defaults to 3, but nothing in the UI lets the user change it yet)
+- Disconnect-specific notifications (only completion/failure are wired up)
+- Manual click-through of the Transfers panel and a real Mac↔server drag transfer in the running app — this has been built and unit-tested but not yet clicked through by hand
 
 ## Phase 6 — FTP/FTPS — **Planned**
 `FTPFileProvider` via FilesProvider (see `DEPENDENCIES.md` for the fallback plan if it proves unmaintained), passive/active mode, TLS cert validation for FTPS.
@@ -72,10 +83,10 @@ Not yet done:
 ## Phase 9 — SMB / network shares — **Planned**
 Mount via `NetFS` first (see `ARCHITECTURE.md` §7); `AMSMB2` only if unmounted browsing is later required.
 
-## Phase 10 — Polish, performance, accessibility, packaging — **Planned**
-VoiceOver labels, keyboard navigation/focus, contrast, customizable shortcuts, app icon/branding, notarization/packaging for distribution outside the App Store (no sandbox yet — see `ARCHITECTURE.md` §6).
+## Phase 10 — Polish, performance, accessibility, packaging — **Partially Implemented**
+Custom app icon done. Still planned: VoiceOver labels, keyboard navigation/focus, contrast, customizable shortcuts, notarization/packaging for distribution outside the App Store (no sandbox yet — see `ARCHITECTURE.md` §6).
 
 ## Milestones (as specified)
 
-1. **First usable milestone:** a polished dual-pane local Mac file manager, architecture already prepared for SFTP/FTP. → Target of Phase 2/3, in progress.
-2. **Second usable milestone:** Mac ↔ home server SFTP transfers (password or key auth) with a real transfer queue. → Target of Phase 4/5.
+1. **First usable milestone:** a polished dual-pane local Mac file manager, architecture already prepared for SFTP/FTP. → Achieved (Phase 2/3).
+2. **Second usable milestone:** Mac ↔ home server SFTP transfers (password or key auth) with a real transfer queue. → Achieved in substance (Phase 4/5: connect/browse/rename/delete/permissions verified by hand against a real server; the transfer queue itself is built and unit-tested but not yet clicked through by hand for an actual cross-provider file move).

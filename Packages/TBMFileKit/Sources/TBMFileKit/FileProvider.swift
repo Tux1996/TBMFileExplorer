@@ -42,6 +42,26 @@ public struct VolumeInfo: Sendable {
     }
 }
 
+/// A destination opened for streamed writing — the write side of cross-provider
+/// transfers (Phase 5's Transfer Engine). Writes are sequential by contract:
+/// callers must `await` each `write` before issuing the next one, and must call
+/// `finish()` exactly once when done (or the destination may be left truncated
+/// or, for SFTP, with its handle never closed).
+public protocol FileWriteSink: Sendable {
+    func write(_ data: Data) async throws
+    func finish() async throws
+}
+
+public enum WriteMode: Sendable {
+    /// Fail with `.alreadyExists` if the destination is already there — the
+    /// "never silently overwrite" default.
+    case createFailIfExists
+    /// Create the destination if it doesn't exist, or open the existing one
+    /// and position writes at its current end — for resuming an interrupted
+    /// transfer, paired with reading the source starting at that same offset.
+    case resumeAppend
+}
+
 public enum FileProviderError: Error, LocalizedError, Sendable {
     case notFound(FilePath)
     case alreadyExists(FilePath)
@@ -82,4 +102,11 @@ public protocol FileProvider: Sendable {
     func rename(_ path: FilePath, to newName: String) async throws -> FilePath
     func setPermissions(_ path: FilePath, mode: UInt16) async throws
     func volumeInfo(for path: FilePath) async throws -> VolumeInfo?
+
+    /// Streams a file's contents in fixed-size chunks without loading the
+    /// whole file into memory — the read side of cross-provider transfers.
+    /// `offset` lets a caller resume a previously-interrupted transfer by
+    /// skipping the bytes the destination already has.
+    func readChunks(_ path: FilePath, startingAt offset: Int64) async -> AsyncThrowingStream<Data, Error>
+    func openWriteSink(_ path: FilePath, mode: WriteMode) async throws -> any FileWriteSink
 }

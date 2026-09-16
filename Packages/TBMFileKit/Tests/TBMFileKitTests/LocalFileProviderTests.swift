@@ -95,4 +95,78 @@ struct LocalFileProviderTests {
         let joined = base.appending("../../etc/passwd")
         #expect(joined.string == "/home/techbymoe/etc/passwd")
     }
+
+    @Test func streamedWriteAndReadRoundTripsExactBytes() async throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(atPath: root.string) }
+        let provider = LocalFileProvider()
+        let path = root.appending("streamed.bin")
+        // Larger than one 256 KB chunk, to exercise the loop.
+        let payload = Data((0..<(300 * 1024)).map { UInt8($0 % 256) })
+
+        let sink = try await provider.openWriteSink(path, mode: .createFailIfExists)
+        for chunk in stride(from: 0, to: payload.count, by: 64 * 1024) {
+            let end = min(chunk + 64 * 1024, payload.count)
+            try await sink.write(payload.subdata(in: chunk..<end))
+        }
+        try await sink.finish()
+
+        var readBack = Data()
+        for try await chunk in await provider.readChunks(path, startingAt: 0) {
+            readBack.append(chunk)
+        }
+        #expect(readBack == payload)
+    }
+
+    @Test func createFailIfExistsThrowsRatherThanOverwriting() async throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(atPath: root.string) }
+        let provider = LocalFileProvider()
+        let path = root.appending("existing.bin")
+        try await provider.createFile(path)
+
+        await #expect(throws: FileProviderError.self) {
+            _ = try await provider.openWriteSink(path, mode: .createFailIfExists)
+        }
+    }
+
+    @Test func resumeAppendContinuesFromExistingEndOfFile() async throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(atPath: root.string) }
+        let provider = LocalFileProvider()
+        let path = root.appending("resumed.bin")
+
+        let firstHalf = Data("first half ".utf8)
+        let firstSink = try await provider.openWriteSink(path, mode: .createFailIfExists)
+        try await firstSink.write(firstHalf)
+        try await firstSink.finish()
+
+        let secondHalf = Data("second half".utf8)
+        let resumedSink = try await provider.openWriteSink(path, mode: .resumeAppend)
+        try await resumedSink.write(secondHalf)
+        try await resumedSink.finish()
+
+        var readBack = Data()
+        for try await chunk in await provider.readChunks(path, startingAt: 0) {
+            readBack.append(chunk)
+        }
+        #expect(readBack == firstHalf + secondHalf)
+    }
+
+    @Test func readChunksStartingAtOffsetSkipsLeadingBytes() async throws {
+        let root = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(atPath: root.string) }
+        let provider = LocalFileProvider()
+        let path = root.appending("offset.bin")
+        let payload = Data("0123456789".utf8)
+        let sink = try await provider.openWriteSink(path, mode: .createFailIfExists)
+        try await sink.write(payload)
+        try await sink.finish()
+
+        var readBack = Data()
+        for try await chunk in await provider.readChunks(path, startingAt: 5) {
+            readBack.append(chunk)
+        }
+        #expect(readBack == Data("56789".utf8))
+    }
 }

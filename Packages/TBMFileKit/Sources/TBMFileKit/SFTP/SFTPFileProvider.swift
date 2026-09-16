@@ -2,6 +2,7 @@ import Citadel
 import Crypto
 import Foundation
 import NIOCore
+import NIOFoundationCompat
 import NIOSSH
 
 public enum SFTPConnectionError: Error, LocalizedError, Sendable, Equatable {
@@ -204,6 +205,55 @@ public actor SFTPFileProvider: FileProvider {
 
     public func volumeInfo(for path: FilePath) async throws -> VolumeInfo? {
         nil // SFTP has no standard "free space" query; see server info panel, Phase 8.
+    }
+
+    // MARK: - Streaming (Phase 5 Transfer Engine)
+
+    public func readChunks(_ path: FilePath, startingAt offset: Int64) async -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let sftp = try await self.ensureConnected()
+                    let file = try await sftp.openFile(filePath: path.string, flags: .read)
+                    var currentOffset = UInt64(offset)
+                    let chunkSize: UInt32 = 256 * 1024
+                    while !Task.isCancelled {
+                        let chunk = try await file.read(from: currentOffset, length: chunkSize)
+                        if chunk.readableBytes == 0 { break }
+                        currentOffset += UInt64(chunk.readableBytes)
+                        continuation.yield(Data(buffer: chunk))
+                    }
+                    try? await file.close()
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: self.map(error, path: path))
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    public func openWriteSink(_ path: FilePath, mode: WriteMode) async throws -> any FileWriteSink {
+        let sftp = try await ensureConnected()
+        var startOffset: UInt64 = 0
+        var flags: SFTPOpenFileFlags = [.write, .create]
+        switch mode {
+        case .createFailIfExists:
+            if (try? await sftp.getAttributes(at: path.string)) != nil {
+                throw FileProviderError.alreadyExists(path)
+            }
+            flags.insert(.forceCreate)
+        case .resumeAppend:
+            if let attributes = try? await sftp.getAttributes(at: path.string), let size = attributes.size {
+                startOffset = size
+            }
+        }
+        do {
+            let file = try await sftp.openFile(filePath: path.string, flags: flags)
+            return SFTPFileWriteSink(file: file, startOffset: startOffset)
+        } catch {
+            throw map(error, path: path)
+        }
     }
 
     // MARK: - Connection lifecycle
@@ -450,5 +500,27 @@ final class SingleResumeContinuation<T>: @unchecked Sendable {
         guard !isResumed else { return }
         isResumed = true
         continuation.resume(throwing: error)
+    }
+}
+
+/// `@unchecked Sendable`: writes must be issued sequentially by contract (see
+/// `FileWriteSink`), so the lack of internal locking around `offset` is safe
+/// under that usage, not despite it.
+final class SFTPFileWriteSink: FileWriteSink, @unchecked Sendable {
+    private let file: SFTPFile
+    private var offset: UInt64
+
+    init(file: SFTPFile, startOffset: UInt64) {
+        self.file = file
+        self.offset = startOffset
+    }
+
+    func write(_ data: Data) async throws {
+        try await file.write(ByteBuffer(data: data), at: offset)
+        offset += UInt64(data.count)
+    }
+
+    func finish() async throws {
+        try await file.close()
     }
 }
