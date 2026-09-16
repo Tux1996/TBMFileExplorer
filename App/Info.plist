@@ -28,5 +28,18 @@
 	<string>Personal project — techbymoe</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>TBM File Explorer internal drag reference</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.techbymoe.TBMFileExplorer.internal-file-ref</string>
+		</dict>
+	</array>
 </dict>
 </plist>

@@ -63,7 +63,7 @@ Not yet done:
 - Hash verification after transfer (MD5/SHA-1/SHA-256) — not implemented
 - A configurable concurrency-limit UI (the `maxConcurrentTransfers` property exists and defaults to 3, but nothing in the UI lets the user change it yet)
 - Disconnect-specific notifications (only completion/failure are wired up)
-- Manual click-through of the Transfers panel and a real Mac↔server drag transfer in the running app — this has been built and unit-tested but not yet clicked through by hand
+- Manual click-through of the Transfers panel UI itself (progress bars, pause/cancel/retry buttons) and the collision dialog — a real Mac↔server drag transfer has been verified by hand and works (see `ARCHITECTURE.md` §12), but that only exercised the transfer completing quickly with no collision, not the rest of the panel
 
 ## Phase 6 — FTP/FTPS — **Planned**
 `FTPFileProvider` via FilesProvider (see `DEPENDENCIES.md` for the fallback plan if it proves unmaintained), passive/active mode, TLS cert validation for FTPS.

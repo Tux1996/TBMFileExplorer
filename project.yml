@@ -38,6 +38,11 @@ targets:
         LSApplicationCategoryType: public.app-category.utilities
         NSPrincipalClass: NSApplication
         LSMinimumSystemVersion: "14.0"
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.techbymoe.TBMFileExplorer.internal-file-ref
+            UTTypeDescription: "TBM File Explorer internal drag reference"
+            UTTypeConformsTo:
+              - public.data
     dependencies:
       - package: TBMFileKit
 
