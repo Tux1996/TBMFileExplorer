@@ -37,13 +37,13 @@ Done, and verified against a real server (see `ARCHITECTURE.md` §10 and `TESTIN
 - Unencrypted-ed25519 SSH-key authentication (`OpenSSHEd25519KeyLoader`)
 - Host key trust-on-first-use + re-confirmation on change (`KnownHostsStore` + `SFTPHostKeyConfirming`, wired to a SwiftUI alert)
 - `ConnectionProfile` model + JSON `ConnectionStore` + Keychain-backed `CredentialManager`
-- Server Connection Manager UI: add/edit/delete sheet in the sidebar, connect into either pane
-- 11 integration tests against a disposable local Docker SFTP server, plus unit tests for the key loader and known-hosts store — 2 real bugs (error-mapping, a copy-loop truncation bug) were caught this way, not by inspection
+- Server Connection Manager UI: add/edit/delete sheet in the sidebar, connect into either pane — clicked through by hand against a real server, not just built
+- 12 integration tests against a disposable local Docker SFTP server, plus unit tests for the key loader and known-hosts store — 3 real bugs caught this way, not by inspection: error-mapping, a copy-loop truncation bug, and a login-timeout bug that broke every real first connection until the host-key confirmation was moved outside Citadel's fixed 10-second handshake budget (see `ARCHITECTURE.md` §10)
 
 Not yet done:
 - Encrypted (passphrase-protected) keys, and RSA/ECDSA keys — blocked on a real gap in Citadel's public API (see `ARCHITECTURE.md` §10); not silently broken, throws a clear error pointing at a workaround
 - Reconnect / keep-alive policy beyond "reconnect lazily on the next call if the connection dropped" (`ensureConnected()` already does that much; no exponential backoff or explicit keep-alive ping yet)
-- Manual click-through of the Connection Manager UI in the running app (see `ARCHITECTURE.md` §10 — this environment can't automate clicks into the native window)
+- Manual click-through of remote browsing/file operations beyond the initial connection (the Connection Manager sheet and connecting itself have been verified by hand — see `ARCHITECTURE.md` §10)
 - A large (multi-GB) transfer test — the copy path is chunked and doesn't buffer whole files, but hasn't been exercised past a few hundred KB test fixture
 
 ## Phase 5 — Transfer manager — **Planned**

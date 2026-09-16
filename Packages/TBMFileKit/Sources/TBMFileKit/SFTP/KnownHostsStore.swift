@@ -34,6 +34,13 @@ public final class KnownHostsStore: @unchecked Sendable {
         return dir.appendingPathComponent("known_hosts.json")
     }
 
+    /// The stored OpenSSH public-key line for a host, if we've trusted one before.
+    public func trustedLine(host: String, port: Int) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries[key(host: host, port: port)]
+    }
+
     public func status(host: String, port: Int, presentedKeyLine: String) -> HostTrustStatus {
         lock.lock()
         defer { lock.unlock() }

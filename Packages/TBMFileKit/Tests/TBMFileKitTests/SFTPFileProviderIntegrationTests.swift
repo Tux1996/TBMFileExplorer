@@ -10,6 +10,16 @@ import Testing
 /// `.enabled(if: TestSFTPServer.isReachable)` so `swift test` still passes
 /// cleanly on a machine that doesn't have the container running (including
 /// CI, until Phase 4 wires a container into that pipeline) — see `TESTING.md`.
+///
+/// `.serialized`: each unknown-host connection now makes two TCP connections
+/// (a throwaway host-key probe, then the real one — see `ARCHITECTURE.md` §10),
+/// and Swift Testing parallelizes tests by default. Running ~10 of these at
+/// once against a small container tripped OpenSSH's `MaxStartups` throttling
+/// and produced real, only-under-load `Disconnected` failures — a test
+/// concurrency artifact, not a product bug, but the fix is still to serialize
+/// against a shared, resource-limited test dependency rather than to loosen
+/// what's being asserted.
+@Suite(.serialized)
 struct SFTPFileProviderIntegrationTests {
     private func withKeyFile<R>(_ body: (String) async throws -> R) async throws -> R {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("tbm-test-\(UUID().uuidString)")
@@ -22,8 +32,7 @@ struct SFTPFileProviderIntegrationTests {
     private func makePasswordProvider(id: UUID = UUID()) throws -> SFTPFileProvider {
         let profile = ConnectionProfile(id: id, name: "Test", host: TestSFTPServer.host, port: TestSFTPServer.port, username: TestSFTPServer.username, authentication: .password, defaultRemotePath: "/data")
         try CredentialManager.save(TestSFTPServer.password, for: profile.id, kind: .password)
-        let store = KnownHostsStore(storeURL: FileManager.default.temporaryDirectory.appendingPathComponent("kh-\(UUID().uuidString).json"))
-        return SFTPFileProvider(profile: profile, knownHosts: store, hostKeyConfirmer: RecordingHostKeyConfirmer())
+        return SFTPFileProvider(profile: profile, knownHosts: TestSFTPServer.sharedKnownHostsStore, hostKeyConfirmer: RecordingHostKeyConfirmer())
     }
 
     @Test(.enabled(if: TestSFTPServer.isReachable))
@@ -43,7 +52,7 @@ struct SFTPFileProviderIntegrationTests {
             let profile = TestSFTPServer.makeProfile(auth: .privateKey, privateKeyPath: keyPath)
             let provider = SFTPFileProvider(
                 profile: profile,
-                knownHosts: KnownHostsStore(storeURL: FileManager.default.temporaryDirectory.appendingPathComponent("kh-\(UUID().uuidString).json")),
+                knownHosts: TestSFTPServer.sharedKnownHostsStore,
                 hostKeyConfirmer: RecordingHostKeyConfirmer()
             )
             let items = try await provider.list(FilePath("/data"), includeHidden: false)
@@ -59,13 +68,40 @@ struct SFTPFileProviderIntegrationTests {
         defer { try? CredentialManager.deleteAll(for: profile.id) }
         let provider = SFTPFileProvider(
             profile: profile,
-            knownHosts: KnownHostsStore(storeURL: FileManager.default.temporaryDirectory.appendingPathComponent("kh-\(UUID().uuidString).json")),
+            knownHosts: TestSFTPServer.sharedKnownHostsStore,
             hostKeyConfirmer: RecordingHostKeyConfirmer()
         )
 
         await #expect(throws: SFTPConnectionError.authenticationFailed) {
             _ = try await provider.list(FilePath("/data"), includeHidden: false)
         }
+    }
+
+    /// Regression test for a real bug found by testing against a live server:
+    /// Citadel gives the whole SSH handshake+auth sequence a hardcoded 10-second
+    /// budget, and host-key validation runs inside that window. A synchronous
+    /// `.custom` validator that waited on this test's `DelayedHostKeyConfirmer`
+    /// would blow that budget and fail with `NIOCore.ChannelError.connectTimeout`
+    /// — exactly what happened the first time this was tried against a real
+    /// server. `resolveHostKeyValidator()`'s probe-then-connect design exists
+    /// specifically so a slow interactive decision can never do that.
+    @Test(.enabled(if: TestSFTPServer.isReachable))
+    func slowHostKeyConfirmationDoesNotBlowTheLoginTimeout() async throws {
+        let profile = ConnectionProfile(name: "Slow Confirm", host: TestSFTPServer.host, port: TestSFTPServer.port, username: TestSFTPServer.username, authentication: .password, defaultRemotePath: "/data")
+        try CredentialManager.save(TestSFTPServer.password, for: profile.id, kind: .password)
+        defer { try? CredentialManager.deleteAll(for: profile.id) }
+        let provider = SFTPFileProvider(
+            profile: profile,
+            knownHosts: KnownHostsStore(storeURL: FileManager.default.temporaryDirectory.appendingPathComponent("kh-\(UUID().uuidString).json")),
+            // Longer than Citadel's fixed 10s login timeout, with the *correct*
+            // password — if this succeeds, the confirmation delay genuinely
+            // isn't counted against the timed connection attempt.
+            hostKeyConfirmer: DelayedHostKeyConfirmer(delaySeconds: 12)
+        )
+        defer { Task { await provider.disconnect() } }
+
+        let items = try await provider.list(FilePath("/data"), includeHidden: false)
+        #expect(items.allSatisfy { !$0.name.isEmpty })
     }
 
     @Test(.enabled(if: TestSFTPServer.isReachable))

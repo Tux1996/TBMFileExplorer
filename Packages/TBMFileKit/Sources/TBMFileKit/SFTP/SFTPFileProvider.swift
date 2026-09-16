@@ -213,18 +213,13 @@ public actor SFTPFileProvider: FileProvider {
             return sftp
         }
 
+        let hostKeyValidator = try await resolveHostKeyValidator()
         let authenticationMethod = try resolveAuthenticationMethod()
-        let delegate = TOFUHostKeyDelegate(
-            host: profile.host,
-            port: profile.port,
-            knownHosts: knownHosts,
-            confirmer: hostKeyConfirmer
-        )
         let settings = SSHClientSettings(
             host: profile.host,
             port: profile.port,
             authenticationMethod: { authenticationMethod },
-            hostKeyValidator: .custom(delegate)
+            hostKeyValidator: hostKeyValidator
         )
 
         let newClient: SSHClient
@@ -249,6 +244,85 @@ public actor SFTPFileProvider: FileProvider {
         self.client = newClient
         self.sftp = newSFTP
         return newSFTP
+    }
+
+    /// Decides how the *real, timed* connection attempt below should validate
+    /// the server's host key — without ever making that attempt wait on an
+    /// interactive decision. Discovered against a live server: Citadel gives
+    /// the whole handshake-plus-authentication sequence a hardcoded, non-
+    /// configurable 10-second budget (`ClientHandshakeHandler`'s
+    /// `loginTimeout`). Host-key validation runs *inside* that window, so the
+    /// original design — asking the user to confirm a fingerprint from
+    /// directly within `validateHostKey`'s callback — reliably failed with
+    /// `NIOCore.ChannelError.connectTimeout` the moment a real human took
+    /// longer than 10 seconds to read a dialog and click a button (see
+    /// `ARCHITECTURE.md` §10 for the full writeup).
+    ///
+    /// The fix: for an already-trusted host, validate synchronously against
+    /// the stored key (`.trustedKeys`, no waiting, comfortably inside 10s).
+    /// For a new or changed host, run a throwaway probe connection first —
+    /// bogus credentials, whose only job is to capture the presented key
+    /// during key exchange and then fail authentication a moment later —
+    /// entirely outside of any timing constraint that matters to the UI. The
+    /// confirmation dialog runs against that already-completed probe, with no
+    /// clock running, and only once that's resolved does the real, timed
+    /// connection attempt begin, already knowing exactly which key to trust.
+    private func resolveHostKeyValidator() async throws -> SSHHostKeyValidator {
+        if let storedLine = knownHosts.trustedLine(host: profile.host, port: profile.port),
+           let storedKey = try? NIOSSHPublicKey(openSSHPublicKey: storedLine) {
+            return .trustedKeys([storedKey])
+        }
+
+        let presentedKey = try await probeHostKey()
+        let line = HostKeyFingerprint.openSSHLine(for: presentedKey)
+        let status = knownHosts.status(host: profile.host, port: profile.port, presentedKeyLine: line)
+        let isChanged: Bool
+        if case .changed = status { isChanged = true } else { isChanged = false }
+        let fingerprint = HostKeyFingerprint.sha256Fingerprint(for: presentedKey) ?? line
+
+        let trusted = await hostKeyConfirmer.confirmHostKey(
+            host: profile.host, port: profile.port, fingerprint: fingerprint, isChanged: isChanged
+        )
+        guard trusted else { throw SFTPConnectionError.hostKeyRejected }
+        try? knownHosts.trust(host: profile.host, port: profile.port, keyLine: line)
+        return .trustedKeys([presentedKey])
+    }
+
+    /// A short-lived connection using intentionally-wrong credentials, made
+    /// solely to see the server's host key during key exchange (which happens
+    /// before authentication) without yet deciding whether to trust it. The
+    /// expected outcome is an authentication failure a fraction of a second
+    /// later, which is treated as success here — the key was already captured
+    /// by then. Only a failure to reach the server *at all* (no key ever
+    /// captured) is reported as an error.
+    private func probeHostKey() async throws -> NIOSSHPublicKey {
+        let host = profile.host
+        let port = profile.port
+        return try await withCheckedThrowingContinuation { continuation in
+            let box = SingleResumeContinuation(continuation)
+            let captureDelegate = CapturingHostKeyDelegate { key in box.resume(returning: key) }
+            let probeSettings = SSHClientSettings(
+                host: host,
+                port: port,
+                authenticationMethod: { .passwordBased(username: "tbm-hostkey-probe", password: UUID().uuidString) },
+                hostKeyValidator: .custom(captureDelegate)
+            )
+            Task {
+                do {
+                    let client = try await SSHClient.connect(to: probeSettings)
+                    try? await client.close()
+                    box.resume(throwing: SFTPConnectionError.underlying(
+                        "Unexpected: verifying \(host)'s identity connected with placeholder credentials."
+                    ))
+                } catch {
+                    // Expected path: the probe's bogus credentials get rejected —
+                    // a no-op if the capture delegate already resumed `box`.
+                    box.resume(throwing: SFTPConnectionError.underlying(
+                        "Couldn't reach \(host):\(port) to verify its identity — \(error.localizedDescription)"
+                    ))
+                }
+            }
+        }
     }
 
     private func resolveAuthenticationMethod() throws -> SSHAuthenticationMethod {
@@ -329,43 +403,52 @@ public actor SFTPFileProvider: FileProvider {
     }
 }
 
-/// Bridges Citadel's promise-based host-key callback to our async confirmation
-/// UI, consulting `KnownHostsStore` first so an already-trusted host never
-/// prompts again.
-final class TOFUHostKeyDelegate: NIOSSHClientServerAuthenticationDelegate, Sendable {
-    private let host: String
-    private let port: Int
-    private let knownHosts: KnownHostsStore
-    private let confirmer: SFTPHostKeyConfirming
+/// Captures whatever host key is presented and accepts it immediately
+/// (synchronously — no async, no waiting) so `probeHostKey()`'s throwaway
+/// connection can get through key exchange fast. This delegate never decides
+/// whether the key is *trustworthy* — `resolveHostKeyValidator()` does that,
+/// afterward, with no timing pressure.
+final class CapturingHostKeyDelegate: NIOSSHClientServerAuthenticationDelegate, Sendable {
+    private let onCapture: @Sendable (NIOSSHPublicKey) -> Void
 
-    init(host: String, port: Int, knownHosts: KnownHostsStore, confirmer: SFTPHostKeyConfirming) {
-        self.host = host
-        self.port = port
-        self.knownHosts = knownHosts
-        self.confirmer = confirmer
+    init(onCapture: @escaping @Sendable (NIOSSHPublicKey) -> Void) {
+        self.onCapture = onCapture
     }
 
     func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
-        let line = HostKeyFingerprint.openSSHLine(for: hostKey)
-        let status = knownHosts.status(host: host, port: port, presentedKeyLine: line)
+        onCapture(hostKey)
+        validationCompletePromise.succeed(())
+    }
+}
 
-        if status == .trusted {
-            validationCompletePromise.succeed(())
-            return
-        }
+/// A `CheckedContinuation` may only be resumed once; `probeHostKey()` has two
+/// independent code paths that might each try (the capture delegate on
+/// success, the connection's `catch` block on failure) racing each other in
+/// the ordinary case where the key was already captured before auth fails a
+/// moment later. This makes the second resume attempt a safe no-op instead of
+/// the fatal error `CheckedContinuation` raises on a double resume.
+final class SingleResumeContinuation<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isResumed = false
+    private let continuation: CheckedContinuation<T, Error>
 
-        let isChanged: Bool
-        if case .changed = status { isChanged = true } else { isChanged = false }
-        let fingerprint = HostKeyFingerprint.sha256Fingerprint(for: hostKey) ?? line
+    init(_ continuation: CheckedContinuation<T, Error>) {
+        self.continuation = continuation
+    }
 
-        Task {
-            let trusted = await confirmer.confirmHostKey(host: host, port: port, fingerprint: fingerprint, isChanged: isChanged)
-            if trusted {
-                try? knownHosts.trust(host: host, port: port, keyLine: line)
-                validationCompletePromise.succeed(())
-            } else {
-                validationCompletePromise.fail(SFTPConnectionError.hostKeyRejected)
-            }
-        }
+    func resume(returning value: T) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !isResumed else { return }
+        isResumed = true
+        continuation.resume(returning: value)
+    }
+
+    func resume(throwing error: Error) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !isResumed else { return }
+        isResumed = true
+        continuation.resume(throwing: error)
     }
 }

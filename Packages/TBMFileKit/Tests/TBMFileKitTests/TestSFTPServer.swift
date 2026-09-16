@@ -61,6 +61,22 @@ enum TestSFTPServer {
         return result == 0
     }
 
+    /// Shared across every test that doesn't specifically exercise the
+    /// unknown-host path, so the group of them collectively pays for the
+    /// probe-then-connect dance (see `ARCHITECTURE.md` §10) once, not once
+    /// per test. Tests that DO care about first-contact behavior
+    /// (`hostKeyIsTrustedOnceThenRemembered`, `rejectingTheHostKeyAbortsTheConnection`,
+    /// `slowHostKeyConfirmationDoesNotBlowTheLoginTimeout`) still use their own
+    /// fresh store instead of this one.
+    /// A fresh file each time the test binary runs (`static let` evaluates once
+    /// per process) — never a fixed filename, since the disposable container
+    /// gets a brand-new random host key on every `docker run`, and a store left
+    /// over from a previous container would cause every test using it to fail
+    /// host-key validation against the new one.
+    static let sharedKnownHostsStore = KnownHostsStore(
+        storeURL: FileManager.default.temporaryDirectory.appendingPathComponent("tbm-shared-known-hosts-\(UUID().uuidString).json")
+    )
+
     static func makeProfile(auth: AuthenticationMethod, privateKeyPath: String? = nil) -> ConnectionProfile {
         ConnectionProfile(
             name: "Test Server",
@@ -81,6 +97,21 @@ final class RecordingHostKeyConfirmer: SFTPHostKeyConfirming, @unchecked Sendabl
 
     func confirmHostKey(host: String, port: Int, fingerprint: String, isChanged: Bool) async -> Bool {
         confirmations.append((host, isChanged))
+        return true
+    }
+}
+
+/// Simulates a real user who takes a while to read the fingerprint dialog and
+/// click "Trust" — used to regression-test that a slow interactive decision
+/// can no longer blow Citadel's fixed 10-second SSH login timeout (see
+/// `ARCHITECTURE.md` §10; this is exactly the bug `resolveHostKeyValidator()`'s
+/// two-phase probe-then-connect design exists to avoid).
+final class DelayedHostKeyConfirmer: SFTPHostKeyConfirming, @unchecked Sendable {
+    let delaySeconds: UInt64
+    init(delaySeconds: UInt64) { self.delaySeconds = delaySeconds }
+
+    func confirmHostKey(host: String, port: Int, fingerprint: String, isChanged: Bool) async -> Bool {
+        try? await Task.sleep(nanoseconds: delaySeconds * 1_000_000_000)
         return true
     }
 }
