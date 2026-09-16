@@ -15,7 +15,7 @@ Done:
 - Per-pane navigation: back/forward/up, editable path bar, refresh
 - Sorting (name/size/modified/kind), folders-first toggle, hidden-file toggle
 - File operations: new folder, rename, duplicate, move to Trash, copy, cut, paste, reveal in Finder, copy path
-- Drag & drop: between panes, from Finder
+- Drag & drop: between panes, from Finder, into a subfolder — verified by hand (the original `.draggable`/`.dropDestination` implementation looked right but silently failed to complete drops on macOS `List`; fixed by switching to `.onDrag`/`.onDrop`, see `ARCHITECTURE.md` §4)
 - Quick Look preview (Space) via `QLPreviewPanel`
 - Basic Get Info panel
 
@@ -43,7 +43,7 @@ Done, and verified against a real server (see `ARCHITECTURE.md` §10 and `TESTIN
 Not yet done:
 - Encrypted (passphrase-protected) keys, and RSA/ECDSA keys — blocked on a real gap in Citadel's public API (see `ARCHITECTURE.md` §10); not silently broken, throws a clear error pointing at a workaround
 - Reconnect / keep-alive policy beyond "reconnect lazily on the next call if the connection dropped" (`ensureConnected()` already does that much; no exponential backoff or explicit keep-alive ping yet)
-- Manual click-through of the remaining remote operations (drag-drop, the "host key changed" re-confirmation) — connecting, renaming, deleting, and setting permissions on a remote file have all been verified by hand against a real server, see `ARCHITECTURE.md` §10
+- Manual click-through of remaining remote-specific operations (drag-drop into/within a server tab — expected to show the "not supported yet" message by design, untested whether it actually does; the "host key changed" re-confirmation) — connecting, renaming, deleting, and setting permissions on a remote file have all been verified by hand against a real server, see `ARCHITECTURE.md` §10
 - A large (multi-GB) transfer test — the copy path is chunked and doesn't buffer whole files, but hasn't been exercised past a few hundred KB test fixture
 
 ## Phase 5 — Transfer manager — **Planned**
