@@ -61,6 +61,19 @@ struct FileListView: View {
     var contextMenu: (FileItem) -> AnyView
     var backgroundContextMenu: () -> AnyView
 
+    /// Native AppKit tables defer collapsing a multi-selection to just the
+    /// clicked row until *mouse-up* specifically so a drag started on an
+    /// already-selected row (mouse-down, then move before releasing) can
+    /// still carry the whole selection. SwiftUI's `List(selection:)` binding
+    /// appears to collapse it immediately on the click instead, before
+    /// `.onDrag`'s closure ever runs — which broke multi-item drag (only the
+    /// clicked row's path survived in `tab.selection` by the time we could
+    /// read it) and made the drag preview flicker away (the list re-renders
+    /// that row as the selection binding changes mid-drag). Tracking the
+    /// selection just before it shrinks lets `.onDrag` recover what the user
+    /// actually had selected.
+    @State private var priorMultiSelection: Set<FilePath> = []
+
     var body: some View {
         VStack(spacing: 0) {
             FileListHeaderView(tab: tab)
@@ -70,9 +83,28 @@ struct FileListView: View {
                     FileRowView(item: item)
                         .tag(item.path)
                         .contentShape(Rectangle())
-                        .onTapGesture(count: 2) { onOpen(item) }
+                        // `.simultaneousGesture` rather than `.onTapGesture`:
+                        // an exclusive tap gesture on the same view as
+                        // `.onDrag` makes AppKit wait out the double-click
+                        // disambiguation window before it can commit to
+                        // starting a drag instead — which is what made
+                        // dragging feel like it needed a long press first.
+                        // Recognizing the double-tap non-exclusively removes
+                        // that wait.
+                        .simultaneousGesture(TapGesture(count: 2).onEnded { onOpen(item) })
                         .onDrag {
-                            DragPayloadKind.makeItemProvider(item: item, providerIdentifier: tab.provider.identifier)
+                            // SwiftUI's per-row .onDrag only ever fires for
+                            // the exact row the drag started on — it doesn't
+                            // automatically bundle the rest of a multi-
+                            // selection the way Finder does. If the dragged
+                            // row is (or just was, see `priorMultiSelection`
+                            // above) part of a larger selection, carry the
+                            // whole selection in this one drag session instead
+                            // of just the one row.
+                            let effectiveSelection = tab.selection.count > 1 ? tab.selection : priorMultiSelection
+                            let selected = tab.displayedItems.filter { effectiveSelection.contains($0.path) }
+                            let items = (effectiveSelection.contains(item.path) && selected.count > 1) ? selected : [item]
+                            return DragPayloadKind.makeItemProvider(items: items, providerIdentifier: tab.provider.identifier)
                         }
                         .onDrop(of: [.fileURL, DragPayloadKind.internalReferenceType], isTargeted: nil) { providers in
                             // A non-directory row can't itself be a drop
@@ -99,6 +131,11 @@ struct FileListView: View {
             .onDrop(of: [.fileURL, DragPayloadKind.internalReferenceType], isTargeted: nil) { providers in
                 DragPayloadKind.resolve(providers) { payloads in onDropIntoCurrentDirectory(payloads) }
                 return true
+            }
+            .onChange(of: tab.selection) { oldValue, _ in
+                if oldValue.count > 1 {
+                    priorMultiSelection = oldValue
+                }
             }
         }
     }

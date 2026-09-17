@@ -26,22 +26,33 @@ enum DragPayloadItem {
     case remote(providerKey: String, path: String)
 }
 
-/// Wire format for the remote case, carried as a private, in-process-only
-/// `NSItemProvider` data representation alongside (or instead of) a `URL`.
+/// Wire format for the remote case (and for a multi-selection drag of any
+/// kind), carried as a private, in-process-only `NSItemProvider` data
+/// representation alongside (or instead of) a `URL`. A single dragged row
+/// only ever produces one `NSItemProvider` via SwiftUI's `.onDrag`, so
+/// dragging a multi-item selection has to bundle every selected path into
+/// that one provider rather than one-provider-per-file — `paths` is why this
+/// is an array even for a single-item drag.
 struct DraggedFileReference: Codable {
     let providerKey: String
-    let path: String
+    let paths: [String]
 }
 
 enum DragPayloadKind {
     static let internalReferenceType = UTType(exportedAs: "com.techbymoe.TBMFileExplorer.internal-file-ref", conformingTo: .data)
 
-    static func makeItemProvider(item: FileItem, providerIdentifier: FileProviderIdentifier) -> NSItemProvider {
+    /// `items` is everything this one drag session should carry — the whole
+    /// current selection if the dragged row is part of a multi-selection,
+    /// or just that one row otherwise (see call site in `FileListView`).
+    static func makeItemProvider(items: [FileItem], providerIdentifier: FileProviderIdentifier) -> NSItemProvider {
         let provider = NSItemProvider()
-        if case .local = providerIdentifier {
-            provider.registerObject(item.path.localURL as NSURL, visibility: .all)
+        // Only a single local file gets the real file-URL representation —
+        // Finder-style multi-file drag-out isn't supported by this one-
+        // provider-per-session approach, only multi-file drag *within* the app.
+        if case .local = providerIdentifier, items.count == 1, let first = items.first {
+            provider.registerObject(first.path.localURL as NSURL, visibility: .all)
         }
-        let reference = DraggedFileReference(providerKey: providerIdentifier.stableKey, path: item.path.string)
+        let reference = DraggedFileReference(providerKey: providerIdentifier.stableKey, paths: items.map { $0.path.string })
         if let data = try? JSONEncoder().encode(reference) {
             provider.registerDataRepresentation(forTypeIdentifier: internalReferenceType.identifier, visibility: .all) { completion in
                 completion(data, nil)
@@ -51,11 +62,13 @@ enum DragPayloadKind {
         return provider
     }
 
-    /// Resolves a drop's `NSItemProvider`s, preferring the internal reference
-    /// (so a same-app remote-row drag round-trips its true source) and
-    /// falling back to a plain file `URL` for local files and Finder imports.
+    /// Resolves a drop's `NSItemProvider`s into individual file references,
+    /// preferring the internal reference (so a same-app drag — remote or a
+    /// multi-selection — round-trips its true source and every selected
+    /// path) and falling back to a plain file `URL` for a single local file
+    /// or a Finder import.
     static func resolve(_ providers: [NSItemProvider], completion: @escaping ([DragPayloadItem]) -> Void) {
-        var results = [DragPayloadItem?](repeating: nil, count: providers.count)
+        var results = [[DragPayloadItem]?](repeating: nil, count: providers.count)
         let group = DispatchGroup()
         for (index, provider) in providers.enumerated() {
             group.enter()
@@ -63,18 +76,18 @@ enum DragPayloadKind {
                 provider.loadDataRepresentation(forTypeIdentifier: internalReferenceType.identifier) { data, _ in
                     defer { group.leave() }
                     guard let data, let reference = try? JSONDecoder().decode(DraggedFileReference.self, from: data) else { return }
-                    results[index] = .remote(providerKey: reference.providerKey, path: reference.path)
+                    results[index] = reference.paths.map { .remote(providerKey: reference.providerKey, path: $0) }
                 }
             } else {
                 _ = provider.loadObject(ofClass: URL.self) { url, _ in
                     defer { group.leave() }
                     guard let url else { return }
-                    results[index] = .local(url)
+                    results[index] = [.local(url)]
                 }
             }
         }
         group.notify(queue: .main) {
-            completion(results.compactMap { $0 })
+            completion(results.compactMap { $0 }.flatMap { $0 })
         }
     }
 }
